@@ -77,6 +77,12 @@ dataclasses of those. Values are validated strictly (no `int` → `float`, no
 `Data(DataSerializer(...), DataValidator(...))` or
 `Static(PlainSerializer(...), PlainValidator(...))`.
 
+Pydantic `BaseModel` subclasses (including nested models and models in the
+supported containers) default to `Static` and round-trip through JSON as model
+instances. Their fields use Pydantic's validation, serializers, and model config;
+loading uses strict validation. Pass model instances when saving. To store models
+as `Data`, supply a custom serializer/validator pair.
+
 Loading takes `extras="forbid" | "ignore"` for stored names that are no longer
 parameters and `missing="raise" | "default"` for parameters absent from a file
 (defaults are filled with a warning).

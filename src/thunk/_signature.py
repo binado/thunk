@@ -17,6 +17,7 @@ from ._spec import (
     Node,
     NoneNode,
     compile_annotation,
+    contains_model,
 )
 
 Role = Literal["data", "static", "skip"]
@@ -126,6 +127,12 @@ def _compile_param(p: inspect.Parameter, globalns: dict[str, Any], owner: str) -
     else:
         role = "data" if node.contains_array else "static"
 
+    if role == "data" and contains_model(node):
+        raise SpecError(
+            f"{owner}: parameter {name!r} contains Pydantic models, which require "
+            "Static storage or a custom Data serializer/validator"
+        )
+
     pyd = Annotated[base, *others] if others else base
     return Param(name, p.kind, p.default, role, node, pyd if role == "static" else None)
 
@@ -165,7 +172,10 @@ class CallSpec:
             return
         try:
             tp = _resolve(raw, globalns)
-            self.output_node = NoneNode() if tp is None else compile_annotation(tp)
+            node = NoneNode() if tp is None else compile_annotation(tp)
+            if contains_model(node):
+                raise SpecError("Pydantic models require JSON storage, not output HDF5")
+            self.output_node = node
         except Exception as exc:
             self.output_error = exc
 

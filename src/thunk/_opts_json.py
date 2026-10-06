@@ -19,6 +19,7 @@ from ._spec import (
     OptionalNode,
     Scalar,
     VarTupleNode,
+    contains_model,
 )
 
 STORAGE_VERSION = 1
@@ -68,7 +69,7 @@ class OptsCodec:
         adapter = self._adapters.get(param.name)
         if adapter is None:
             # Wrapped in a 1-tuple: pydantic refuses ``config=`` for a bare
-            # dataclass, but still applies it to dataclasses nested in a wrapper.
+            # dataclass or model. Models retain their own config in the wrapper.
             adapter = TypeAdapter(tuple[param.pydantic_annotation], config=_CONFIG)
             self._adapters[param.name] = adapter
         return adapter
@@ -79,7 +80,12 @@ class OptsCodec:
         for p in self.params:
             assert p.node is not None
             p.node.validate(values[p.name], p.name)
-            out[p.name] = json.loads(self.adapter(p).dump_json((values[p.name],)))[0]
+            out[p.name] = json.loads(
+                self.adapter(p).dump_json(
+                    (values[p.name],),
+                    by_alias=True if contains_model(p.node) else None,
+                )
+            )[0]
         return out
 
     def decode_one(self, param: Param, raw: Any, where: str) -> Any:

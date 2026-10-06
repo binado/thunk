@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import numpy as np
+from pydantic import BaseModel
 
 from . import _jax
 from ._errors import SpecError, ValueTypeError
@@ -233,6 +234,46 @@ class DataclassNode(Node):
 
 
 @dataclass(frozen=True)
+class ModelNode(Node):
+    """A Pydantic model whose validation and JSON encoding belong to Pydantic."""
+
+    cls: type[BaseModel]
+    schema: Json
+
+    def validate(self, value: Any, path: str) -> None:
+        if not isinstance(value, self.cls):
+            _fail(path, self.cls.__name__, value)
+
+    def describe(self) -> Json:
+        return {
+            "kind": "pydantic_model",
+            "type": qualified_name(self.cls),
+            "schema": self.schema,
+        }
+
+
+def contains_model(node: Node) -> bool:
+    """Whether a node contains a model requiring the JSON backend."""
+    match node:
+        case ModelNode():
+            return True
+        case (
+            OptionalNode(inner=inner)
+            | ListNode(inner=inner)
+            | VarTupleNode(inner=inner)
+        ):
+            return contains_model(inner)
+        case DictNode(value=inner):
+            return contains_model(inner)
+        case FixedTupleNode(items=items):
+            return any(contains_model(item) for item in items)
+        case DataclassNode(fields=fields):
+            return any(contains_model(item) for _, item in fields)
+        case _:
+            return False
+
+
+@dataclass(frozen=True)
 class CustomData(Node):
     """A parameter stored through a user-supplied ``Data`` serializer pair."""
 
@@ -354,6 +395,15 @@ def _compile(tp: Any, stack: tuple[Any, ...], where: str) -> Node:
 
     if tp in (list, dict, tuple):
         raise SpecError(f"{where}: bare {tp.__name__} is not supported; parametrize it")
+
+    if isinstance(tp, type) and issubclass(tp, BaseModel):
+        try:
+            schema = tp.model_json_schema(mode="serialization")
+        except Exception as exc:
+            raise SpecError(
+                f"{where}: cannot derive JSON schema for {qualified_name(tp)}: {exc}"
+            ) from exc
+        return ModelNode(tp, schema)
 
     if origin is None and isinstance(tp, type) and dataclasses.is_dataclass(tp):
         return _compile_dataclass(tp, stack)
