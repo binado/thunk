@@ -1,0 +1,63 @@
+[project]
+name = "thunk"
+version = "0.1.0"
+description = "Generate automatic save and load methods for functions that manipulate arrays"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "binado", email = "bernardopveronese@gmail.com" },
+]
+requires-python = ">=3.12"
+dependencies = [
+    "h5py>=3.16.0",
+    "numpy>=2.5.3",
+    "pydantic>=2.13.5",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+
+
+    "Programming Language :: Python :: 3.12",
+
+
+    "Programming Language :: Python :: 3.13",
+
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/binado/thunk"
+Repository = "https://github.com/binado/thunk.git"
+Issues = "https://github.com/binado/thunk/issues"
+
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "prek>=0.5.3",
+    "ruff>=0.16.0",
+    "ty>=0.0.83",
+    { include-group = "test" },
+]
+test = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.ty.src]
+include = ["src", "tests"]
