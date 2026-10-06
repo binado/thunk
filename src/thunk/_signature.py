@@ -1,5 +1,6 @@
 """Signature compilation, role resolution, and argument binding."""
 
+import functools
 import inspect
 import sys
 import types
@@ -245,6 +246,8 @@ class CallSpec:
 
 
 def _hint_target(function: Callable[..., Any]) -> Any:
+    while isinstance(function, functools.partial):
+        function = function.func
     if inspect.isroutine(function) or isinstance(function, type):
         return function
     return type(function).__call__

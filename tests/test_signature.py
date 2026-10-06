@@ -1,3 +1,4 @@
+import functools
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -187,3 +188,12 @@ def test_callable_instance_and_bound_method() -> None:
     for target in (Scale(3), Scale(3).method):
         pfn = thunk.fn(target)
         assert pfn(*pfn.flatten(2)) == target(2)
+
+
+def test_partial_resolves_postponed_annotations_from_wrapped_function() -> None:
+    def f(a: int, p: "Population") -> int:
+        return a
+
+    f.__globals__["Population"] = Population
+    pfn = thunk.fn(functools.partial(f, 1))
+    assert [p.name for p in pfn._spec.params] == ["p"]
