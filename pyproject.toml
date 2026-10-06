@@ -34,6 +34,11 @@ Homepage = "https://github.com/binado/thunk"
 Repository = "https://github.com/binado/thunk.git"
 Issues = "https://github.com/binado/thunk/issues"
 
+[project.optional-dependencies]
+jax = [
+    "jax>=0.11.2",
+]
+
 
 [build-system]
 requires = ["uv_build>=0.12.18,<0.13"]
@@ -41,6 +46,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "jax>=0.11.2",
     "prek>=0.5.3",
     "ruff>=0.16.0",
     "ty>=0.0.83",

@@ -10,6 +10,7 @@ from typing import Any
 import h5py
 import numpy as np
 
+from . import _jax
 from ._errors import SerializerContractError, StorageFormatError, ValueTypeError
 from ._spec import (
     Array,
@@ -18,6 +19,7 @@ from ._spec import (
     DataclassNode,
     DictNode,
     FixedTupleNode,
+    JaxArray,
     ListNode,
     LiteralNode,
     Node,
@@ -196,6 +198,12 @@ def write_node(parent: h5py.Group, name: str, node: Node, value: Any) -> None:
             _write_none(parent, name)
         case Array():
             _write_array(parent, name, value)
+        case JaxArray():
+            data, implementation = _jax.to_host(value, f"{parent.name}/{name}")
+            ds = parent.create_dataset(name, data=data)
+            ds.attrs["jax_kind"] = "prng_key" if implementation else "array"
+            if implementation is not None:
+                ds.attrs["jax_impl"] = implementation
         case OptionalNode(inner=inner):
             if value is None:
                 _write_none(parent, name)
@@ -314,6 +322,22 @@ def read_node(obj: Any, node: Node, where: str) -> Any:
             if not isinstance(obj, h5py.Dataset):
                 raise StorageFormatError(f"{where}: expected an array dataset")
             return _read_array(obj, where)
+        case JaxArray():
+            if not isinstance(obj, h5py.Dataset):
+                raise StorageFormatError(f"{where}: expected a JAX array dataset")
+            kind = _attr(obj, "jax_kind", where)
+            if not isinstance(kind, str) or kind not in ("array", "prng_key"):
+                raise StorageFormatError(f"{where}: unsupported jax_kind {kind!r}")
+            implementation = (
+                _attr(obj, "jax_impl", where) if kind == "prng_key" else None
+            )
+            if implementation is not None and not isinstance(implementation, str):
+                raise StorageFormatError(f"{where}: malformed PRNG implementation")
+            if obj.shape is None or obj.dtype not in _jax.NUMERIC_DTYPES:
+                raise StorageFormatError(
+                    f"{where}: unsupported JAX dataset shape or dtype"
+                )
+            return _jax.from_host(np.asarray(obj[()]), kind, implementation, where)
         case OptionalNode(inner=inner):
             if isinstance(obj, h5py.Group) and _attr(obj, "kind", where) == "none":
                 return None
