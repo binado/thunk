@@ -10,7 +10,7 @@ from typing import Any
 import h5py
 import numpy as np
 
-from ._errors import SerializerContractError, StorageFormatError
+from ._errors import SerializerContractError, StorageFormatError, ValueTypeError
 from ._spec import (
     Array,
     CustomData,
@@ -365,7 +365,14 @@ def read_node(obj: Any, node: Node, where: str) -> Any:
         case CustomData(validator=validator):
             g = _expect_group(obj, "custom", where)
             nested = _read_nested(g, where)
-            return validator.func(nested)
+            result = validator.func(nested)
+            try:
+                node.validate(result, where)
+            except ValueTypeError as exc:
+                raise SerializerContractError(
+                    f"{where}: validator returned a wrong type: {exc}"
+                ) from exc
+            return result
         case CustomStatic():
             raise TypeError("custom static parameters are stored in the opts file")
         case _:

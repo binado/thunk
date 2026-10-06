@@ -180,3 +180,20 @@ def test_wrong_value_type_for_custom_rejected(tmp_path: Path) -> None:
     pfn = thunk.fn(f)
     with pytest.raises(thunk.ValueTypeError):
         pfn.save_inputs(tmp_path / "i.h5", {"m": "not a mesh"})
+
+
+def test_validator_returning_wrong_type_rejected(tmp_path: Path) -> None:
+    def g(
+        m: Annotated[
+            Mesh,
+            thunk.Data(
+                thunk.DataSerializer(_mesh_ser),
+                thunk.DataValidator(lambda d: "not a mesh"),
+            ),
+        ],
+    ) -> None: ...
+
+    pfn = thunk.fn(g)
+    pfn.save_inputs(tmp_path / "i.h5", {"m": Mesh(np.zeros(1), "x")})
+    with pytest.raises(thunk.SerializerContractError, match="wrong type"):
+        pfn.load_inputs(tmp_path / "i.h5")
