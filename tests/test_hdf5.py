@@ -104,6 +104,7 @@ def test_float_scalars(tmp_path: Path, x: float) -> None:
         np.array([True, False]),
         np.array([1 + 2j]),
         np.array(["ab", "cde", ""]),
+        np.array(["ab", "日本", ""], dtype=">U2"),
         np.array([["é", "日本"], ["x", "yz"]]),
         np.array("scalar-str"),
         np.array(5.0),

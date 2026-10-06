@@ -176,7 +176,9 @@ def _read_array(ds: h5py.Dataset, where: str) -> np.ndarray:
         if dtype.kind != "U" or data.dtype != np.dtype("<u4") or data.ndim < 1:
             raise StorageFormatError(f"{where}: malformed unicode array")
         shape = data.shape[:-1]
-        return np.asarray(data, order="C").reshape(-1).view(dtype).reshape(shape)
+        nchar = data.shape[-1]
+        native = np.asarray(data, order="C").reshape(-1).view(f"<U{nchar}")
+        return native.astype(dtype).reshape(shape)
     if data.dtype.kind not in "biufcS":
         raise StorageFormatError(f"{where}: unsupported dtype {data.dtype}")
     return data
