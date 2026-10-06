@@ -2,6 +2,14 @@
 
 Generate automatic save and load methods for functions that manipulate arrays
 
+## Installation
+
+```console
+uv add thunk
+# or
+pip install thunk
+```
+
 ## Usage
 
 `thunk.fn` derives save/load methods from a callable's type annotations. It
@@ -16,39 +24,39 @@ import thunk
 
 
 @dataclass(frozen=True)
-class Population:
-    positions: np.ndarray
+class Params:
+    y: np.ndarray
     labels: list[str]
 
 
-def spectra(
-    seeds: np.ndarray,
+def simulator(
+    x: np.ndarray,
     /,
-    population: Population,
+    params: Params,
     *,
-    bins: int = 128,
+    seed: int = 0,
     chunk_size: Annotated[int, thunk.Skip()] = 4096,
 ) -> np.ndarray: ...
 
 
-pfn = thunk.fn(spectra)
+pfn = thunk.fn(simulator)
 
-# Bind arguments and split them into persisted groups (does not run spectra).
-inputs, opts = pfn.flatten(seeds, population, bins=256)
+# Bind arguments and split them into persisted groups (does not run simulator).
+inputs, opts = pfn.flatten(x, params, seed=42)
 
 pfn.save_inputs("inputs.h5", inputs)
 pfn.save_opts("opts.json", opts)
 # ... or flatten and save both in one step:
-pfn.save("inputs.h5", "opts.json", seeds, population, bins=256)
+pfn.save("inputs.h5", "opts.json", x, params, seed=42)
 
 # Restore, optionally edit the configuration, and run.
 inputs = pfn.load_inputs("inputs.h5")
 opts = pfn.load_opts("opts.json")
 result = pfn(inputs, opts)
 
-# Or restore a legal Python call without executing spectra.
+# Or restore a legal Python call without executing simulator.
 args, kwargs = pfn.load(inputs="inputs.h5", opts="opts.json")
-result = spectra(*args, **kwargs)
+result = simulator(*args, **kwargs)
 
 pfn.save_output("output.h5", result, inputs=inputs, opts=opts)
 restored = pfn.load_output("output.h5")
@@ -73,7 +81,9 @@ Loading takes `extras="forbid" | "ignore"` for stored names that are no longer
 parameters and `missing="raise" | "default"` for parameters absent from a file
 (defaults are filled with a warning).
 
-## Setup
+## Contributing
+
+### Setup
 
 [Install uv](https://docs.astral.sh/uv/getting-started/installation/) and
 [Just](https://just.systems/man/en/packages.html), then run:
@@ -85,9 +95,7 @@ uv run prek install
 
 The underlying command is `uv sync --all-groups` if Just is unavailable.
 
-
-
-## Development
+### Development
 
 ```console
 just fmt        # uv run ruff check --fix . && uv run ruff format .
@@ -98,7 +106,7 @@ just hooks      # uv run prek run --all-files
 just check      # full validation, tests, and package build
 ```
 
-## Update from the template
+### Update from the template
 
 The template runs `uv lock`, so updates must explicitly trust it:
 
@@ -107,9 +115,12 @@ uvx copier@9.18.2 update --trust
 just check
 ```
 
-
-## Publishing
+### Publishing
 
 Configure `pypi` and `testpypi` GitHub environments with trusted publishers.
 Push a tag matching the version in `pyproject.toml`, such as `v0.1.0`, to
 publish to PyPI. Run the Release workflow manually to publish to TestPyPI.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
