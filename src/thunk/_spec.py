@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import numpy as np
 
+from . import _jax
 from ._errors import SpecError, ValueTypeError
 from ._markers import ROLE_MARKERS, Data, DataSerializer, DataValidator
 
@@ -83,6 +84,19 @@ class Array(Node):
 
     def describe(self) -> Json:
         return {"kind": "array"}
+
+
+@dataclass(frozen=True)
+class JaxArray(Node):
+    @property
+    def contains_array(self) -> bool:
+        return True
+
+    def validate(self, value: Any, path: str) -> None:
+        _jax.validate(value, path)
+
+    def describe(self) -> Json:
+        return {"kind": "jax_array"}
 
 
 @dataclass(frozen=True)
@@ -297,6 +311,8 @@ def _compile(tp: Any, stack: tuple[Any, ...], where: str) -> Node:
         return Scalar(tp)
     if tp is np.ndarray or origin is np.ndarray:
         return Array()
+    if _jax.is_annotation(tp):
+        return JaxArray()
     if tp is typing.Any:
         raise SpecError(f"{where}: Any is not supported")
 

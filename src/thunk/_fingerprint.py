@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from . import _jax
 from ._signature import Param
 from ._spec import (
     Array,
@@ -16,6 +17,7 @@ from ._spec import (
     DataclassNode,
     DictNode,
     FixedTupleNode,
+    JaxArray,
     ListNode,
     LiteralNode,
     Node,
@@ -103,6 +105,13 @@ class _Hasher:
                 self.tag(b"N")
             case Array():
                 self.array(value)
+            case JaxArray():
+                data, implementation = _jax.to_host(value, "content digest")
+                if implementation is None:
+                    self.tag(b"J")
+                else:
+                    self.blob(b"K", implementation.encode())
+                self.array(data)
             case OptionalNode(inner=inner):
                 if value is None:
                     self.tag(b"N")

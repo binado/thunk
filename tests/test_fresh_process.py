@@ -27,6 +27,24 @@ def run_fresh(code: str) -> str:
     return done.stdout
 
 
+def test_numpy_compilation_does_not_import_jax() -> None:
+    run_fresh("""
+        import sys
+        import importlib.abc
+        class NoJax(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "jax" or fullname.startswith("jax."):
+                    raise AssertionError("thunk imported JAX")
+        sys.meta_path.insert(0, NoJax())
+        import numpy as np
+        import thunk
+        def f(x: np.ndarray) -> np.ndarray:
+            raise AssertionError("body executed")
+        thunk.fn(f)
+        assert "jax" not in sys.modules
+    """)
+
+
 def test_restore_in_fresh_process_without_running_body(tmp_path: Path) -> None:
     pfn = thunk.fn(explode)
     x = np.linspace(0, 1, 5)

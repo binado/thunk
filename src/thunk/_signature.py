@@ -246,8 +246,9 @@ class CallSpec:
 
 
 def _hint_target(function: Callable[..., Any]) -> Any:
+    function = inspect.unwrap(function)
     while isinstance(function, functools.partial):
-        function = function.func
+        function = inspect.unwrap(function.func)
     if inspect.isroutine(function) or isinstance(function, type):
         return function
     return type(function).__call__
