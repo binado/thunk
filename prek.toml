@@ -1,0 +1,39 @@
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [
+  { id = "check-yaml" },
+  { id = "end-of-file-fixer" },
+  { id = "trailing-whitespace" },
+]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "ruff-check"
+name = "ruff check"
+language = "system"
+entry = "uv run ruff check --fix"
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff format"
+language = "system"
+entry = "uv run ruff format"
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "ty-check"
+name = "ty check"
+language = "system"
+entry = "uv run ty check"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "uv-lock-check"
+name = "uv lock check"
+language = "system"
+entry = "uv lock --check"
+pass_filenames = false
