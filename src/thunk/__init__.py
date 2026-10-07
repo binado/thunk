@@ -13,7 +13,7 @@ from ._errors import (
     ValueTypeError,
 )
 from ._markers import Data, DataSerializer, DataValidator, Skip, Static
-from ._persistence import Extras, FunctionPersistence, Missing, fn
+from ._persistence import Extras, FunctionPersistence, Missing, cache, fn
 
 __version__ = version("thunk")
 
@@ -35,5 +35,6 @@ __all__ = [
     "ThunkError",
     "ValueTypeError",
     "__version__",
+    "cache",
     "fn",
 ]

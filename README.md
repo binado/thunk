@@ -104,8 +104,9 @@ optionally under `base_dir`. It never accesses files or executes the function,
 and does not require a supported return annotation. The key includes persisted
 parameter schemas and values, excluding function identity, return annotations,
 `Skip` arguments, and file paths. Use directories such as `simulator-v1` to
-separate computations and revisions. There is no automatic execution or cache
-reuse. Hashes are recomputed so mutations are reflected.
+separate computations and revisions. This method does not execute the function or reuse cached results; use
+`cached()` or `thunk.cache()` for that. Hashes are recomputed so mutations are
+reflected.
 
 Parameter groups are hashed in signature order; nested dictionary order remains
 significant. Array layout and byte order are normalized, while dtype, shape, and
@@ -128,6 +129,65 @@ transaction. Parent directories must already exist, destinations must be
 distinct, and older lockfiles remain in place. Editing either referenced file
 requires a new lockfile. Both `save()` and `save_locked()` forward all function
 keyword arguments, including one named `lockfile`.
+
+## Disk caching
+
+Cache a function's output using its persisted arguments:
+
+```python
+cached_simulator = thunk.cache(simulator, namespace="myproject/simulator-v1")
+result = cached_simulator(x, params, seed=42, chunk_size=4096)
+# The same persisted arguments load the saved result without running simulator.
+result = cached_simulator(x, params, seed=42, chunk_size=4096)
+```
+
+Or use already flattened or restored groups:
+
+```python
+inputs, opts = pfn.flatten(x, params, seed=42)
+result = pfn.cached(
+    inputs,
+    opts,
+    namespace="myproject/simulator-v1",
+    skipped={"chunk_size": 4096},
+)
+```
+
+Both interfaces share entries at `<base_dir>/<namespace>/<digest>.h5` and require
+an explicit `namespace`. The root defaults to
+`platformdirs.user_cache_path("thunk", appauthor=False)` (normally
+`~/.cache/thunk` on Linux or `~/Library/Caches/thunk` on macOS). Pass
+`base_dir=".cache"` for project-local storage. Namespaces are nonempty relative
+paths; slash-separated names are supported, but absolute paths, backslashes,
+empty components, `.` and `..` components are rejected. Directories are created
+automatically on a miss.
+
+The namespace identifies the computation and revision, including bound instance
+state, partial arguments omitted from the exposed signature, captured values,
+and external dependencies that affect results. Change it when those change.
+There is no automatic function, source, or package-version hashing. Persisted
+arguments must determine results together with that namespace; `Skip` values
+must only control execution details that do not affect results. Persist random
+seeds or keys explicitly. Do not mutate inputs during execution, and do not rely
+on side effects being replayed on cache hits.
+
+A supported return annotation is required. Hits validate the output schema and
+recorded argument digests before restoring the result. These digests identify
+inputs; they are not checksums of the output payload. Invalid files, schema or
+digest mismatches, and permission errors propagate rather than triggering
+recomputation. Only absent entries are misses.
+
+Pass `refresh=True` to recompute and atomically replace an entry. Failed
+computation or saving preserves an existing entry. For `thunk.cache`, cache
+controls are fixed when constructing the wrapper: a wrapper created with
+`refresh=True` recomputes on every invocation. All arguments passed to the
+wrapper itself belong to the underlying function, even arguments named
+`namespace`, `base_dir`, or `refresh`. Refresh only replaces invoked entries;
+a new namespace invalidates the computation's entire cache logically.
+
+Caching saves outputs only; input files and lockfiles are optional. Concurrent
+misses may execute the function more than once, with the last successful atomic
+replacement winning. There is no eviction, expiration, or concurrency locking.
 
 ## JAX arrays and random keys
 
