@@ -3,6 +3,7 @@ from dataclasses import InitVar, dataclass, field
 from typing import Annotated, Any, ClassVar, Literal
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 import thunk
@@ -59,6 +60,8 @@ class SelfRef:
         (int, Scalar),
         (None, NoneNode),
         (np.ndarray, Array),
+        (npt.NDArray, Array),
+        (npt.NDArray[np.float64], Array),
         (Literal["a", "b"], LiteralNode),
         (int | None, OptionalNode),
         (list[int], ListNode),
@@ -87,6 +90,7 @@ def test_supported(tp: Any, cls: type) -> None:
         int | str | None,
         set[int],
         bytes,
+        npt.NDArray[np.float64, np.int64],  # ty: ignore[invalid-type-arguments]
         Literal[1.5],  # ty: ignore[invalid-type-form]
         WithInitVar,
         NonInit,

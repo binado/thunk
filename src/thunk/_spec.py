@@ -296,6 +296,19 @@ def _compile(tp: Any, stack: tuple[Any, ...], where: str) -> Node:
 
     origin = get_origin(tp)
 
+    if isinstance(origin, typing.TypeAliasType):
+        # e.g. ``npt.NDArray[np.float64]``: subscripting a PEP 695 alias yields
+        # a GenericAlias whose origin is the alias itself, not the aliased type
+        if origin in stack:
+            raise SpecError(
+                f"{where}: recursive type {origin.__name__} is not supported"
+            )
+        try:
+            resolved = origin.__value__[get_args(tp)]
+        except TypeError as exc:
+            raise SpecError(f"{where}: unsupported annotation {tp!r} ({exc})") from exc
+        return _compile(resolved, (*stack, origin), where)
+
     if origin is Annotated:
         meta = tp.__metadata__
         if contains_role_marker(meta):
