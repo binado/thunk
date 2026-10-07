@@ -275,23 +275,28 @@ class FunctionPersistence[R]:
                 raise SchemaMismatchError(
                     f"{input_path}: fingerprints differ from lock"
                 )
+            serialized_inputs = self._read_inputs(
+                f, input_path, stored_fps, "forbid", "raise", serialized=True
+            )
+            raw = _opts_json.read_opts(opts_path)
+            self._resolve_names(
+                "opts", opts_path, list(raw), None, self._spec.static, "forbid", "raise"
+            )
+            # Verify serialized values before validators can transform them.
+            try:
+                opts_digest = json_digest(self._ordered(self._spec.static, raw))
+            except (TypeError, ValueError) as exc:
+                raise StorageFormatError(
+                    f"{opts_path}: invalid serialized options"
+                ) from exc
+            inputs_digest = group_digest(
+                self._spec.data, serialized_inputs, serialized=True
+            )
+            if inputs_digest != lock.inputs.digest or opts_digest != lock.opts.digest:
+                raise DigestMismatchError(f"{path}: content differs from lock")
+            if combined_digest(fps, inputs_digest, opts_digest) != lock.digest:
+                raise DigestMismatchError(f"{path}: combined digest differs from lock")
             inputs = self._read_inputs(f, input_path, stored_fps, "forbid", "raise")
-        raw = _opts_json.read_opts(opts_path)
-        self._resolve_names(
-            "opts", opts_path, list(raw), None, self._spec.static, "forbid", "raise"
-        )
-        # Verify serialized values before validators can transform them.
-        try:
-            opts_digest = json_digest(self._ordered(self._spec.static, raw))
-        except (TypeError, ValueError) as exc:
-            raise StorageFormatError(
-                f"{opts_path}: invalid serialized options"
-            ) from exc
-        inputs_digest = group_digest(self._spec.data, inputs)
-        if inputs_digest != lock.inputs.digest or opts_digest != lock.opts.digest:
-            raise DigestMismatchError(f"{path}: content differs from lock")
-        if combined_digest(fps, inputs_digest, opts_digest) != lock.digest:
-            raise DigestMismatchError(f"{path}: combined digest differs from lock")
         opts = {
             p.name: self._opts.decode_one(p, raw[p.name], str(opts_path))
             for p in self._spec.static
@@ -399,6 +404,8 @@ class FunctionPersistence[R]:
         fps: Mapping[str, Any],
         extras: Extras,
         missing: Missing,
+        *,
+        serialized: bool = False,
     ) -> dict[str, Any]:
         group = f.get("inputs")
         if not isinstance(group, h5py.Group):
@@ -413,7 +420,10 @@ class FunctionPersistence[R]:
             missing,
         )
         values = {
-            p.name: _hdf5.read_node(group[p.name], _node(p), p.name) for p in to_read
+            p.name: _hdf5.read_node(
+                group[p.name], _node(p), p.name, serialized=serialized
+            )
+            for p in to_read
         }
         return self._ordered(self._spec.data, values | filled)
 

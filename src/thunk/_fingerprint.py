@@ -97,7 +97,7 @@ class _Hasher:
         else:
             self.scalar(value)
 
-    def feed(self, node: Node, value: Any) -> None:
+    def feed(self, node: Node, value: Any, *, serialized: bool = False) -> None:
         match node:
             case Scalar() | LiteralNode():
                 self.scalar(value)
@@ -117,27 +117,31 @@ class _Hasher:
                     self.tag(b"N")
                 else:
                     self.tag(b"S")
-                    self.feed(inner, value)
+                    self.feed(inner, value, serialized=serialized)
             case ListNode(inner=inner) | VarTupleNode(inner=inner):
                 self.blob(b"[", struct.pack(">Q", len(value)))
                 for item in value:
-                    self.feed(inner, item)
+                    self.feed(inner, item, serialized=serialized)
             case FixedTupleNode(items=items):
                 self.tag(b"(")
                 for sub, item in zip(items, value, strict=True):
-                    self.feed(sub, item)
+                    self.feed(sub, item, serialized=serialized)
             case DictNode(value=inner):
                 self.blob(b"{", struct.pack(">Q", len(value)))
                 for key, item in value.items():
                     self.scalar(key)
-                    self.feed(inner, item)
+                    self.feed(inner, item, serialized=serialized)
             case DataclassNode(fields=fields):
                 self.tag(b"D")
                 for name, sub in fields:
-                    self.feed(sub, getattr(value, name))
+                    self.feed(
+                        sub,
+                        value[name] if serialized else getattr(value, name),
+                        serialized=serialized,
+                    )
             case CustomData(serializer=serializer):
                 self.tag(b"C")
-                self.nested(serializer.func(value))
+                self.nested(value if serialized else serializer.func(value))
             case CustomStatic():
                 raise TypeError("custom static values are digested through JSON")
             case _:
@@ -147,13 +151,15 @@ class _Hasher:
         return self.h.hexdigest()
 
 
-def group_digest(params: tuple[Param, ...], values: Mapping[str, Any]) -> str:
+def group_digest(
+    params: tuple[Param, ...], values: Mapping[str, Any], *, serialized: bool = False
+) -> str:
     """Content digest of a group of ``Data`` parameter values."""
     hasher = _Hasher()
     for p in params:
         assert p.node is not None
         hasher.blob(b"p", p.name.encode())
-        hasher.feed(p.node, values[p.name])
+        hasher.feed(p.node, values[p.name], serialized=serialized)
     return hasher.hexdigest()
 
 

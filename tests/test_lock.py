@@ -336,3 +336,77 @@ def test_signature_and_nested_input_order() -> None:
     key = thunk.fn(a).output_path(inputs, opts)
     assert thunk.fn(b).output_path(inputs, opts) != key
     assert thunk.fn(a).output_path({"x": {"b": 2, "a": 1}}, opts) != key
+
+
+def test_lossy_mesh_validator_cannot_hide_tampering(tmp_path: Path) -> None:
+    from test_custom_serializers import Interval, Mesh, f
+
+    p = thunk.fn(f)
+    lock = p.save_locked(
+        tmp_path / "i.h5",
+        tmp_path / "o.json",
+        Interval(0.5, 2.5),
+        Mesh(np.zeros((3, 2)), "tri"),
+    )
+    with h5py.File(tmp_path / "i.h5", "r+") as h:
+        h["inputs/m/meta/n"].attrs["value"] = "999"
+    with pytest.raises(thunk.DigestMismatchError):
+        p.load_lock(lock)
+
+
+def test_data_verified_before_user_code(tmp_path: Path) -> None:
+    calls = []
+
+    def encode(value: int) -> dict[str, int]:
+        calls.append("encode")
+        return {"value": value}
+
+    def decode(raw: dict[str, int]) -> int:
+        calls.append("decode")
+        return raw["value"] + 1
+
+    def g(
+        x: Annotated[
+            int, thunk.Data(thunk.DataSerializer(encode), thunk.DataValidator(decode))
+        ],
+    ) -> None: ...
+
+    p = thunk.fn(g)
+    lock = p.save_locked(tmp_path / "i.h5", tmp_path / "o.json", 1)
+    calls.clear()
+    assert p.load_lock(lock) == ({"x": 2}, {})
+    assert calls == ["decode"]
+    calls.clear()
+    with h5py.File(tmp_path / "i.h5", "r+") as h:
+        h["inputs/x/value"].attrs["value"] = "999"
+    with pytest.raises(thunk.DigestMismatchError):
+        p.load_lock(lock)
+    assert calls == []
+
+
+def test_dataclass_constructed_only_after_verification(tmp_path: Path) -> None:
+    from dataclasses import dataclass
+
+    calls = []
+
+    @dataclass
+    class Box:
+        value: int
+
+        def __post_init__(self) -> None:
+            calls.append("construct")
+
+    def g(x: Annotated[list[Box], thunk.Data()]) -> None: ...
+
+    p = thunk.fn(g)
+    lock = p.save_locked(tmp_path / "i.h5", tmp_path / "o.json", [Box(1)])
+    calls.clear()
+    inputs, _ = p.load_lock(lock)
+    assert inputs["x"][0].value == 1
+    assert calls == ["construct"]
+    calls.clear()
+    with h5py.File(tmp_path / "i.h5", "r+") as h:
+        h["inputs/x/0/value"].attrs["value"] = "999"
+    with pytest.raises(thunk.DigestMismatchError):
+        p.load_lock(lock)
+    assert calls == []
