@@ -135,7 +135,7 @@ keyword arguments, including one named `lockfile`.
 Cache a function's output using its persisted arguments:
 
 ```python
-cached_simulator = thunk.cache(simulator, namespace="myproject/simulator-v1")
+cached_simulator = thunk.cache(simulator, outdir=".cache/simulator-v1")
 result = cached_simulator(x, params, seed=42, chunk_size=4096)
 # The same persisted arguments load the saved result without running simulator.
 result = cached_simulator(x, params, seed=42, chunk_size=4096)
@@ -148,26 +148,22 @@ inputs, opts = pfn.flatten(x, params, seed=42)
 result = pfn.cached(
     inputs,
     opts,
-    namespace="myproject/simulator-v1",
+    outdir=".cache/simulator-v1",
     skipped={"chunk_size": 4096},
 )
 ```
 
-Both interfaces share entries at `<base_dir>/<namespace>/<digest>.h5` and require
-an explicit `namespace`. The root defaults to
-`platformdirs.user_cache_path("thunk", appauthor=False)` (normally
-`~/.cache/thunk` on Linux or `~/Library/Caches/thunk` on macOS). Pass
-`base_dir=".cache"` for project-local storage. Namespaces are nonempty relative
-paths; slash-separated names are supported, but absolute paths, backslashes,
-empty components, `.` and `..` components are rejected. Directories are created
-automatically on a miss.
+Both interfaces share entries at `<outdir>/<digest>.h5` and require an explicit
+`outdir` (a string or path-like object). Relative and absolute paths are supported.
+Directories are created automatically on a miss.
 
-The namespace identifies the computation and revision, including bound instance
-state, partial arguments omitted from the exposed signature, captured values,
-and external dependencies that affect results. Change it when those change.
-There is no automatic function, source, or package-version hashing. Persisted
-arguments must determine results together with that namespace; `Skip` values
-must only control execution details that do not affect results. Persist random
+Each output directory must identify one computation and revision, including bound
+instance state, partial arguments omitted from the exposed signature, captured
+values, and external dependencies that affect results. Use a new directory when
+those change. There is no automatic function, source, or package-version hashing.
+Persisted arguments must determine results together with that computation and
+revision; `Skip` values must only control execution details that do not affect
+results. Persist random
 seeds or keys explicitly. Do not mutate inputs during execution, and do not rely
 on side effects being replayed on cache hits.
 
@@ -182,8 +178,8 @@ computation or saving preserves an existing entry. For `thunk.cache`, cache
 controls are fixed when constructing the wrapper: a wrapper created with
 `refresh=True` recomputes on every invocation. All arguments passed to the
 wrapper itself belong to the underlying function, even arguments named
-`namespace`, `base_dir`, or `refresh`. Refresh only replaces invoked entries;
-a new namespace invalidates the computation's entire cache logically.
+`outdir` or `refresh`. Refresh only replaces invoked entries;
+a new output directory starts a separate cache without deleting existing entries.
 
 Caching saves outputs only; input files and lockfiles are optional. Concurrent
 misses may execute the function more than once, with the last successful atomic

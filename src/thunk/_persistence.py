@@ -6,11 +6,10 @@ import warnings
 from collections.abc import Callable, Mapping
 from functools import wraps
 from numbers import Integral
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any, Literal
 
 import h5py
-import platformdirs
 
 from . import _hdf5, _opts_json
 from ._atomic import publish_all
@@ -36,22 +35,6 @@ def _node(p: Param) -> Node:
 type PathLike = str | os.PathLike[str]
 type Extras = Literal["forbid", "ignore"]
 type Missing = Literal["raise", "default"]
-
-
-def _cache_directory(namespace: str, base_dir: PathLike | None) -> Path:
-    if (
-        not namespace
-        or "\\" in namespace
-        or PureWindowsPath(namespace).drive
-        or any(part in ("", ".", "..") for part in namespace.split("/"))
-    ):
-        raise ValueError("namespace must be a nonempty relative path without traversal")
-    root = (
-        platformdirs.user_cache_path("thunk", appauthor=False)
-        if base_dir is None
-        else Path(base_dir)
-    )
-    return root / namespace
 
 
 class FunctionPersistence[R]:
@@ -120,21 +103,19 @@ class FunctionPersistence[R]:
         opts: Mapping[str, Any],
         /,
         *,
-        namespace: str,
-        base_dir: PathLike | None = None,
+        outdir: PathLike,
         skipped: Mapping[str, Any] | None = None,
         refresh: bool = False,
     ) -> R:
         """Load a cached result or compute and atomically save it.
 
-        ``namespace`` identifies the computation and revision. ``base_dir``
-        defaults to the OS user cache directory for thunk. Only absent entries
-        are misses; invalid entries raise. ``refresh`` bypasses reading.
+        ``outdir`` stores entries for one computation and revision. Only absent
+        entries are misses; invalid entries raise. ``refresh`` bypasses reading.
 
         Persisted inputs must remain unchanged during execution. Skipped values
         must not affect results. Concurrent misses may execute more than once.
         """
-        directory = _cache_directory(namespace, base_dir)
+        directory = Path(outdir)
         node = self._spec.require_output()
         merged = self._spec.merge(inputs, opts, skipped)
         digests, _ = self._digests(inputs, opts)
@@ -656,8 +637,7 @@ def cache[**P, R](
     function: Callable[P, R],
     /,
     *,
-    namespace: str,
-    base_dir: PathLike | None = None,
+    outdir: PathLike,
     refresh: bool = False,
 ) -> Callable[P, R]:
     """Wrap a callable with disk caching; all invocation arguments go to it.
@@ -665,7 +645,7 @@ def cache[**P, R](
     Cache controls are fixed at construction. ``refresh=True`` recomputes on
     every invocation. See ``FunctionPersistence.cached`` for cache semantics.
     """
-    _cache_directory(namespace, base_dir)
+    outdir = Path(outdir)
     persistence = fn(function)
     persistence._spec.require_output()
 
@@ -677,8 +657,7 @@ def cache[**P, R](
         return persistence.cached(
             {p.name: values[p.name] for p in persistence._spec.data},
             {p.name: values[p.name] for p in persistence._spec.static},
-            namespace=namespace,
-            base_dir=base_dir,
+            outdir=outdir,
             skipped={p.name: values[p.name] for p in persistence._spec.skip},
             refresh=refresh,
         )

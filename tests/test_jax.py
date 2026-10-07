@@ -437,7 +437,7 @@ def test_cached_jax_output(tmp_path: Path) -> None:
         calls.append(1)
         return x + 1
 
-    cached = thunk.cache(f, namespace="jax/v1", base_dir=tmp_path)
+    cached = thunk.cache(f, outdir=tmp_path / "jax/v1")
     x = jax.numpy.arange(3, dtype=jax.numpy.int32)
     assert_array(cached(x), x + 1)
     assert_array(cached(x), x + 1)
