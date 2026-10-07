@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-07
+
+### Added
+
+- Optional JAX integration (`thunk[jax]`) that persists `jax.Array` values and
+  typed PRNG keys to HDF5, including batched and empty key arrays. Typed keys
+  restore using their stored implementation, and unsupported dtypes raise
+  `ValueTypeError` instead of narrowing.
+
+### Fixed
+
+- Support parameterized `numpy.typing.NDArray[...]` annotations, which
+  previously fell through to an "unsupported annotation" error. Wrong arity now
+  raises a clear `SpecError` instead of `TypeError`.
+
 ## [0.1.0] - 2026-10-06
 
 ### Added
@@ -19,5 +34,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ThunkError` exception hierarchy.
 - Typed package (`py.typed`) for Python 3.12 to 3.14.
 
-[Unreleased]: https://github.com/binado/thunk/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/binado/thunk/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/binado/thunk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/binado/thunk/releases/tag/v0.1.0
