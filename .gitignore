@@ -7,3 +7,9 @@ build/
 .pytest_cache/
 .ruff_cache/
 .claude/settings.local.json
+*.md
+!README.md
+!AGENTS.md
+!CLAUDE.md
+!CONTRIBUTING.md
+!CHANGELOG.md
