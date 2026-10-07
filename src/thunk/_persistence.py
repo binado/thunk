@@ -1,8 +1,11 @@
 """``FunctionPersistence`` and the ``fn`` entry point."""
 
 import os
+import stat
 import warnings
 from collections.abc import Callable, Mapping
+from functools import wraps
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Literal
 
@@ -91,6 +94,51 @@ class FunctionPersistence[R]:
         merged = self._spec.merge(inputs, opts, skipped)
         args, kwargs = self._spec.to_call(merged)
         return self._spec.function(*args, **kwargs)
+
+    # -- caching ---------------------------------------------------------
+
+    def cached(
+        self,
+        inputs: Mapping[str, Any],
+        opts: Mapping[str, Any],
+        /,
+        *,
+        outdir: PathLike,
+        skipped: Mapping[str, Any] | None = None,
+        refresh: bool = False,
+    ) -> R:
+        """Load a cached result or compute and atomically save it.
+
+        ``outdir`` stores entries for one computation and revision. Only absent
+        entries are misses; invalid entries raise. ``refresh`` bypasses reading.
+
+        Persisted inputs must remain unchanged during execution. Skipped values
+        must not affect results. Concurrent misses may execute more than once.
+        """
+        directory = Path(outdir)
+        node = self._spec.require_output()
+        merged = self._spec.merge(inputs, opts, skipped)
+        digests, _ = self._digests(inputs, opts)
+        path = directory / f"{digests['digest']}.h5"
+        if not refresh:
+            try:
+                mode = path.stat().st_mode
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISDIR(mode):
+                    raise IsADirectoryError(path)
+                if not stat.S_ISREG(mode):
+                    raise StorageFormatError(
+                        f"{path}: cache entry is not a regular file"
+                    )
+                return self._load_output(path, expected=digests)
+        directory.mkdir(parents=True, exist_ok=True)
+        args, kwargs = self._spec.to_call(merged)
+        result = self._spec.function(*args, **kwargs)
+        node.validate(result, "output")
+        self._save_output(path, result, digests)
+        return result
 
     # -- encoding helpers ------------------------------------------------
 
@@ -501,6 +549,13 @@ class FunctionPersistence[R]:
         node = self._spec.require_output()
         node.validate(output, "output")
         extra, _ = self._digests(inputs, opts)
+        self._save_output(path, output, extra)
+
+    def _save_output(
+        self, path: PathLike, output: R, extra: Mapping[str, str | int]
+    ) -> None:
+        """Publish an already validated output with precomputed metadata."""
+        node = self._spec.require_output()
         fps = {"output": output_fingerprint(node)}
 
         def write(p: Path) -> None:
@@ -520,10 +575,34 @@ class FunctionPersistence[R]:
         SchemaMismatchError
             If the stored output schema differs from the return annotation.
         """
+        return self._load_output(path)
+
+    def _load_output(
+        self, path: PathLike, *, expected: Mapping[str, str | int] | None = None
+    ) -> R:
         node = self._spec.require_output()
         path = Path(path)
         f, fps = _hdf5.open_checked(path, "output")
         with f:
+            if expected is not None:
+                for name, value in expected.items():
+                    stored = _hdf5._attr(f, name, path)
+                    if name == "digest_version":
+                        valid = isinstance(stored, Integral) and not isinstance(
+                            stored, bool
+                        )
+                        if not valid or stored != DIGEST_VERSION:
+                            raise StorageFormatError(f"{path}: invalid digest_version")
+                    elif (
+                        not isinstance(stored, str)
+                        or len(stored) != 64
+                        or any(c not in "0123456789abcdef" for c in stored)
+                    ):
+                        raise StorageFormatError(f"{path}: invalid {name}")
+                    if stored != value:
+                        raise DigestMismatchError(
+                            f"{path}: {name} differs from cache key"
+                        )
             if fps.get("output") != output_fingerprint(node):
                 raise SchemaMismatchError(
                     f"{path}: output schema differs from the return annotation"
@@ -554,4 +633,36 @@ def fn[R](function: Callable[..., R], /) -> FunctionPersistence[R]:
     return FunctionPersistence(function)
 
 
-__all__ = ["Extras", "FunctionPersistence", "Missing", "fn"]
+def cache[**P, R](
+    function: Callable[P, R],
+    /,
+    *,
+    outdir: PathLike,
+    refresh: bool = False,
+) -> Callable[P, R]:
+    """Wrap a callable with disk caching; all invocation arguments go to it.
+
+    Cache controls are fixed at construction. ``refresh=True`` recomputes on
+    every invocation. See ``FunctionPersistence.cached`` for cache semantics.
+    """
+    outdir = Path(outdir)
+    persistence = fn(function)
+    persistence._spec.require_output()
+
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        bound = persistence._spec.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        return persistence.cached(
+            {p.name: values[p.name] for p in persistence._spec.data},
+            {p.name: values[p.name] for p in persistence._spec.static},
+            outdir=outdir,
+            skipped={p.name: values[p.name] for p in persistence._spec.skip},
+            refresh=refresh,
+        )
+
+    return wrapped
+
+
+__all__ = ["Extras", "FunctionPersistence", "Missing", "cache", "fn"]

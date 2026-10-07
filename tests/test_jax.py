@@ -428,3 +428,17 @@ def test_locked_key_and_output_path(tmp_path: Path) -> None:
     key = p.output_path(*p.flatten(*args))
     lock = p.save_locked(tmp_path / "i.h5", tmp_path / "o.json", *args)
     assert p.output_path(*p.load_lock(lock)) == key
+
+
+def test_cached_jax_output(tmp_path: Path) -> None:
+    calls = []
+
+    def f(x: jax.Array) -> jax.Array:
+        calls.append(1)
+        return x + 1
+
+    cached = thunk.cache(f, outdir=tmp_path / "jax/v1")
+    x = jax.numpy.arange(3, dtype=jax.numpy.int32)
+    assert_array(cached(x), x + 1)
+    assert_array(cached(x), x + 1)
+    assert calls == [1]

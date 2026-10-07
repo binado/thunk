@@ -30,4 +30,4 @@ class OutputCodecError(ThunkError, TypeError):
 
 
 class DigestMismatchError(ThunkError, ValueError):
-    """Stored content or the combined key disagrees with its lockfile."""
+    """Stored content or the combined key disagrees with its lockfile or cache key."""
