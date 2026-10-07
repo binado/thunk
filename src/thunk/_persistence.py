@@ -10,13 +10,16 @@ import h5py
 
 from . import _hdf5, _opts_json
 from ._atomic import publish_all
-from ._errors import SchemaMismatchError, StorageFormatError
+from ._errors import DigestMismatchError, SchemaMismatchError, StorageFormatError
 from ._fingerprint import (
+    DIGEST_VERSION,
+    combined_digest,
     group_digest,
     json_digest,
     output_fingerprint,
     param_fingerprint,
 )
+from ._lock import Lock, LockedGroup, read_lock
 from ._signature import CallSpec, Param
 from ._spec import Node
 
@@ -114,8 +117,7 @@ class FunctionPersistence[R]:
     def _opts_writer(self, opts: Mapping[str, Any]) -> Callable[[Path], None]:
         self._spec.check_names(opts, self._spec.static, "opts")
         encoded = self._opts.encode(opts)
-        fps = {p.name: param_fingerprint(p) for p in self._spec.static}
-        return lambda path: _opts_json.write_opts(path, fps, encoded)
+        return lambda path: _opts_json.write_opts(path, encoded)
 
     # -- save ------------------------------------------------------------
 
@@ -165,6 +167,137 @@ class FunctionPersistence[R]:
             ]
         )
 
+    def _fingerprints(self) -> dict[str, dict[str, str]]:
+        return {
+            "inputs": {p.name: param_fingerprint(p) for p in self._spec.data},
+            "opts": {p.name: param_fingerprint(p) for p in self._spec.static},
+        }
+
+    def _digests(
+        self, inputs: Mapping[str, Any] | None, opts: Mapping[str, Any] | None
+    ) -> tuple[dict[str, str | int], dict[str, Any] | None]:
+        extra: dict[str, str | int] = {}
+        encoded = None
+        if inputs is not None:
+            self._validate_inputs(inputs)
+            extra["inputs_digest"] = group_digest(self._spec.data, inputs)
+        if opts is not None:
+            self._spec.check_names(opts, self._spec.static, "opts")
+            encoded = self._opts.encode(opts)
+            extra["opts_digest"] = json_digest(encoded)
+        if inputs is not None and opts is not None:
+            extra["digest"] = combined_digest(
+                self._fingerprints(),
+                str(extra["inputs_digest"]),
+                str(extra["opts_digest"]),
+            )
+            extra["digest_version"] = DIGEST_VERSION
+        return extra, encoded
+
+    def output_path(
+        self,
+        inputs: Mapping[str, Any],
+        opts: Mapping[str, Any],
+        *,
+        base_dir: PathLike | None = None,
+    ) -> Path:
+        """Return a content/schema-derived filename without touching the filesystem.
+
+        Function identity, return annotations, and skipped arguments are excluded.
+        Use a computation-specific base directory to distinguish implementations.
+        """
+        digests, _ = self._digests(inputs, opts)
+        return (
+            Path(base_dir) / f"{digests['digest']}.h5"
+            if base_dir is not None
+            else Path(f"{digests['digest']}.h5")
+        )
+
+    def save_locked(
+        self, input_file: PathLike, opts_file: PathLike, /, *args: Any, **kwargs: Any
+    ) -> Path:
+        """Save both groups and publish their lockfile last; return its path.
+
+        All three files are prepared before any replacement. Replacements are
+        individually atomic, not a transaction. Parent directories must exist.
+        Custom serializers must produce deterministic representations.
+        """
+        inputs, opts = self.flatten(*args, **kwargs)
+        digests, encoded = self._digests(inputs, opts)
+        assert encoded is not None
+        path = Path(opts_file).parent / f"{digests['digest']}.lock.json"
+        fps = self._fingerprints()
+        lock = Lock(
+            version=1,
+            digest_version=DIGEST_VERSION,
+            digest=str(digests["digest"]),
+            inputs=LockedGroup(
+                path=os.path.relpath(
+                    Path(input_file).absolute(), path.parent.absolute()
+                ),
+                digest=str(digests["inputs_digest"]),
+                fingerprints=fps["inputs"],
+            ),
+            opts=LockedGroup(
+                path=os.path.relpath(
+                    Path(opts_file).absolute(), path.parent.absolute()
+                ),
+                digest=str(digests["opts_digest"]),
+                fingerprints=fps["opts"],
+            ),
+        )
+        publish_all(
+            [
+                (input_file, self._inputs_writer(inputs)),
+                (opts_file, lambda p: _opts_json.write_opts(p, encoded)),
+                (path, lock.write),
+            ]
+        )
+        return path
+
+    def load_lock(self, path: PathLike, /) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Verify and restore the exact pair; no extras or default filling."""
+        path = Path(path)
+        lock = read_lock(path)
+        fps = self._fingerprints()
+        if (
+            lock.inputs.fingerprints != fps["inputs"]
+            or lock.opts.fingerprints != fps["opts"]
+        ):
+            raise SchemaMismatchError(f"{path}: locked parameter schemas differ")
+        input_path, opts_path = (
+            path.parent / lock.inputs.path,
+            path.parent / lock.opts.path,
+        )
+        f, stored_fps = _hdf5.open_checked(input_path, "inputs")
+        with f:
+            if stored_fps != lock.inputs.fingerprints:
+                raise SchemaMismatchError(
+                    f"{input_path}: fingerprints differ from lock"
+                )
+            inputs = self._read_inputs(f, input_path, stored_fps, "forbid", "raise")
+        raw = _opts_json.read_opts(opts_path)
+        self._resolve_names(
+            "opts", opts_path, list(raw), None, self._spec.static, "forbid", "raise"
+        )
+        # Verify serialized values before validators can transform them.
+        try:
+            opts_digest = json_digest(self._ordered(self._spec.static, raw))
+        except (TypeError, ValueError) as exc:
+            raise StorageFormatError(
+                f"{opts_path}: invalid serialized options"
+            ) from exc
+        inputs_digest = group_digest(self._spec.data, inputs)
+        if inputs_digest != lock.inputs.digest or opts_digest != lock.opts.digest:
+            raise DigestMismatchError(f"{path}: content differs from lock")
+        if combined_digest(fps, inputs_digest, opts_digest) != lock.digest:
+            raise DigestMismatchError(f"{path}: combined digest differs from lock")
+        opts = {
+            p.name: self._opts.decode_one(p, raw[p.name], str(opts_path))
+            for p in self._spec.static
+        }
+        return inputs, opts
+
     # -- load ------------------------------------------------------------
 
     def _resolve_names(
@@ -172,7 +305,7 @@ class FunctionPersistence[R]:
         label: str,
         path: Path,
         stored: list[str],
-        stored_fps: Mapping[str, Any],
+        stored_fps: Mapping[str, Any] | None,
         params: tuple[Param, ...],
         extras: Extras,
         missing: Missing,
@@ -203,9 +336,11 @@ class FunctionPersistence[R]:
         stored_set = set(stored)
         for p in params:
             if p.name in stored_set:
-                if p.name not in stored_fps:
+                if stored_fps is not None and p.name not in stored_fps:
                     raise StorageFormatError(f"{path}: no fingerprint for {p.name!r}")
-                if stored_fps[p.name] != param_fingerprint(p):
+                if stored_fps is not None and stored_fps[p.name] != param_fingerprint(
+                    p
+                ):
                     raise SchemaMismatchError(
                         f"{path}: schema of {p.name!r} changed since the file was written"
                     )
@@ -255,22 +390,31 @@ class FunctionPersistence[R]:
         path = Path(path)
         f, fps = _hdf5.open_checked(path, "inputs")
         with f:
-            group = f.get("inputs")
-            if not isinstance(group, h5py.Group):
-                raise StorageFormatError(f"{path}: missing /inputs group")
-            to_read, filled = self._resolve_names(
-                "inputs",
-                path,
-                list(group.keys()),
-                fps,
-                self._spec.data,
-                extras,
-                missing,
-            )
-            values = {
-                p.name: _hdf5.read_node(group[p.name], _node(p), p.name)
-                for p in to_read
-            }
+            return self._read_inputs(f, path, fps, extras, missing)
+
+    def _read_inputs(
+        self,
+        f: h5py.File,
+        path: Path,
+        fps: Mapping[str, Any],
+        extras: Extras,
+        missing: Missing,
+    ) -> dict[str, Any]:
+        group = f.get("inputs")
+        if not isinstance(group, h5py.Group):
+            raise StorageFormatError(f"{path}: missing /inputs group")
+        to_read, filled = self._resolve_names(
+            "inputs",
+            path,
+            list(group.keys()),
+            fps,
+            self._spec.data,
+            extras,
+            missing,
+        )
+        values = {
+            p.name: _hdf5.read_node(group[p.name], _node(p), p.name) for p in to_read
+        }
         return self._ordered(self._spec.data, values | filled)
 
     def load_opts(
@@ -283,9 +427,9 @@ class FunctionPersistence[R]:
     ) -> dict[str, Any]:
         """Read and reconstruct the opts file; see ``load_inputs`` for policies."""
         path = Path(path)
-        fps, raw = _opts_json.read_opts_envelope(path)
+        raw = _opts_json.read_opts(path)
         to_read, filled = self._resolve_names(
-            "opts", path, list(raw), fps, self._spec.static, extras, missing
+            "opts", path, list(raw), None, self._spec.static, extras, missing
         )
         values = {
             p.name: self._opts.decode_one(p, raw[p.name], str(path)) for p in to_read
@@ -346,13 +490,7 @@ class FunctionPersistence[R]:
         """
         node = self._spec.require_output()
         node.validate(output, "output")
-        extra: dict[str, str] = {}
-        if inputs is not None:
-            self._validate_inputs(inputs)
-            extra["inputs_digest"] = group_digest(self._spec.data, inputs)
-        if opts is not None:
-            self._spec.check_names(opts, self._spec.static, "opts")
-            extra["opts_digest"] = json_digest(self._opts.encode(opts))
+        extra, _ = self._digests(inputs, opts)
         fps = {"output": output_fingerprint(node)}
 
         def write(p: Path) -> None:

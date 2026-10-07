@@ -21,7 +21,6 @@ from ._spec import (
     VarTupleNode,
 )
 
-STORAGE_VERSION = 1
 _NONFINITE = {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf}
 _CONFIG = ConfigDict(ser_json_inf_nan="strings")
 
@@ -97,34 +96,17 @@ class OptsCodec:
         return value
 
 
-def write_opts(
-    path: Path, fingerprints: Mapping[str, str], encoded: Mapping[str, Any]
-) -> None:
-    envelope = {
-        "thunk_format": "opts",
-        "storage_version": STORAGE_VERSION,
-        "fingerprints": dict(fingerprints),
-        "values": dict(encoded),
-    }
+def write_opts(path: Path, encoded: Mapping[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as f:
-        json.dump(envelope, f, indent=2, allow_nan=False)
+        json.dump(dict(encoded), f, indent=2, allow_nan=False)
         f.write("\n")
 
 
-def read_opts_envelope(path: Path) -> tuple[dict[str, str], dict[str, Any]]:
-    if not path.is_file():
-        raise FileNotFoundError(path)
+def read_opts(path: Path) -> dict[str, Any]:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise StorageFormatError(f"{path}: not valid JSON: {exc}") from exc
-    if not isinstance(doc, dict) or doc.get("thunk_format") != "opts":
-        raise StorageFormatError(f"{path}: not a thunk 'opts' file")
-    if doc.get("storage_version") != STORAGE_VERSION:
-        raise StorageFormatError(
-            f"{path}: unsupported storage_version {doc.get('storage_version')!r}"
-        )
-    fps, values = doc.get("fingerprints"), doc.get("values")
-    if not isinstance(fps, dict) or not isinstance(values, dict):
-        raise StorageFormatError(f"{path}: malformed envelope")
-    return fps, values
+    if not isinstance(doc, dict):
+        raise StorageFormatError(f"{path}: options must be a JSON object")
+    return doc

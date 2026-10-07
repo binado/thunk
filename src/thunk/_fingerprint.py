@@ -160,3 +160,23 @@ def group_digest(params: tuple[Param, ...], values: Mapping[str, Any]) -> str:
 def json_digest(encoded: Mapping[str, Any]) -> str:
     """Digest of an opts group's JSON encoding (insertion order is significant)."""
     return _sha256(json.dumps(encoded, separators=(",", ":"), allow_nan=False))
+
+
+DIGEST_VERSION = 1
+
+
+def combined_digest(
+    fingerprints: Mapping[str, Mapping[str, str]],
+    inputs_digest: str,
+    opts_digest: str,
+) -> str:
+    return _sha256(
+        canonical_json(
+            {
+                "digest_version": DIGEST_VERSION,
+                "fingerprints": fingerprints,
+                "inputs_digest": inputs_digest,
+                "opts_digest": opts_digest,
+            }
+        )
+    )

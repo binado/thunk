@@ -64,16 +64,15 @@ def test_roundtrip_restores_types(tmp_path: Path) -> None:
     assert list(out) == list(opts)
 
 
-def test_file_is_strict_json_with_envelope(tmp_path: Path) -> None:
+def test_file_is_plain_strict_json(tmp_path: Path) -> None:
     pfn = thunk.fn(f)
     _, opts = pfn.flatten(**make_args())
     path = tmp_path / "o.json"
     pfn.save_opts(path, opts)
     doc = json.loads(path.read_text(), parse_constant=lambda c: pytest.fail(c))
-    assert doc["thunk_format"] == "opts" and doc["storage_version"] == 1
-    assert set(doc["fingerprints"]) == set(doc["values"])
-    assert doc["values"]["window"] == [1.0, "-Infinity", "NaN"]
-    assert list(doc["values"]["table"]) == ["z", "a", "m"]
+    assert set(doc) == set(opts)
+    assert doc["window"] == [1.0, "-Infinity", "NaN"]
+    assert list(doc["table"]) == ["z", "a", "m"]
 
 
 def test_int_float_strictness_on_write(tmp_path: Path) -> None:
@@ -87,7 +86,7 @@ def test_int_float_strictness_on_write(tmp_path: Path) -> None:
 
 def _edit(path: Path, name: str, raw: object) -> None:
     doc = json.loads(path.read_text())
-    doc["values"][name] = raw
+    doc[name] = raw
     path.write_text(json.dumps(doc))
 
 
@@ -125,24 +124,24 @@ def test_integral_float_literal_for_float_param_loads_as_float(tmp_path: Path) -
     assert type(pfn.load_opts(path)["limit"]) is float
 
 
-@pytest.mark.parametrize("text", ["{", "[]", '{"thunk_format": "inputs"}'])
-def test_bad_envelope(tmp_path: Path, text: str) -> None:
+@pytest.mark.parametrize("text", ["{", "[]"])
+def test_bad_json(tmp_path: Path, text: str) -> None:
     path = tmp_path / "o.json"
     path.write_text(text)
     with pytest.raises(thunk.StorageFormatError):
         thunk.fn(f).load_opts(path)
 
 
-def test_bad_version(tmp_path: Path) -> None:
-    pfn = thunk.fn(f)
-    _, opts = pfn.flatten(**make_args())
-    path = tmp_path / "o.json"
-    pfn.save_opts(path, opts)
-    doc = json.loads(path.read_text())
-    doc["storage_version"] = 2
-    path.write_text(json.dumps(doc))
-    with pytest.raises(thunk.StorageFormatError, match="storage_version"):
-        pfn.load_opts(path)
+def test_metadata_like_names_are_plain_options(tmp_path: Path) -> None:
+    def f(
+        thunk_format: str, storage_version: int, fingerprints: str, values: int
+    ) -> None: ...
+
+    p = thunk.fn(f)
+    opts = dict(thunk_format="opts", storage_version=99, fingerprints="x", values=4)
+    p.save_opts(tmp_path / "o.json", opts)
+    assert json.loads((tmp_path / "o.json").read_text()) == opts
+    assert p.load_opts(tmp_path / "o.json") == opts
 
 
 def test_opts_digest_distinguishes_int_float_and_order(tmp_path: Path) -> None:

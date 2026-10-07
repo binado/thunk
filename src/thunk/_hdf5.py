@@ -37,7 +37,7 @@ _NONFINITE = {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf}
 
 
 def write_envelope(
-    f: h5py.File, kind: str, fingerprints: Mapping[str, str], **extra: str
+    f: h5py.File, kind: str, fingerprints: Mapping[str, str], **extra: str | int
 ) -> None:
     f.attrs["thunk_format"] = kind
     f.attrs["storage_version"] = STORAGE_VERSION
