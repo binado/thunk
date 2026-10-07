@@ -3,6 +3,7 @@
 from importlib.metadata import version
 
 from ._errors import (
+    DigestMismatchError,
     OutputCodecError,
     SchemaMismatchError,
     SerializerContractError,
@@ -20,6 +21,7 @@ __all__ = [
     "Data",
     "DataSerializer",
     "DataValidator",
+    "DigestMismatchError",
     "Extras",
     "FunctionPersistence",
     "Missing",

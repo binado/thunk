@@ -81,6 +81,54 @@ Loading takes `extras="forbid" | "ignore"` for stored names that are no longer
 parameters and `missing="raise" | "default"` for parameters absent from a file
 (defaults are filled with a warning).
 
+## Deterministic output paths and locked inputs
+
+Options files contain only serialized option values (for example,
+`{"seed": 42}`), with no metadata envelope. This intentionally replaces the
+old options format; legacy envelopes are not supported. `load_opts()` checks
+names and values against current annotations, but cannot detect historical
+schema changes. Use a lockfile when exact persisted schemas matter:
+
+```python
+lock_path = pfn.save_locked("inputs.h5", "opts.json", x, params, seed=42)
+inputs, opts = pfn.load_lock(lock_path)
+
+output_path = pfn.output_path(inputs, opts, base_dir="outputs/simulator-v1")
+# Create the output directory before saving; thunk does not create directories.
+result = pfn(inputs, opts)
+pfn.save_output(output_path, result, inputs=inputs, opts=opts)
+```
+
+`output_path()` validates both groups and returns `<full SHA-256 digest>.h5`,
+optionally under `base_dir`. It never accesses files or executes the function,
+and does not require a supported return annotation. The key includes persisted
+parameter schemas and values, excluding function identity, return annotations,
+`Skip` arguments, and file paths. Use directories such as `simulator-v1` to
+separate computations and revisions. There is no automatic execution or cache
+reuse. Hashes are recomputed so mutations are reflected.
+
+Parameter groups are hashed in signature order; nested dictionary order remains
+significant. Array layout and byte order are normalized, while dtype, shape, and
+values remain significant. Custom serializers must produce deterministic
+representations. When both groups are passed to `save_output()`, its HDF5
+attributes include `digest`, `digest_version`, and the two group digests.
+
+`save_locked()` returns `<digest>.lock.json` beside the options file. Its strict,
+versioned metadata records each group's relative path, digest, and schema
+fingerprints. Paths may contain `..`; relocating the files together preserves
+the lock. Input HDF5 files also retain their fingerprints. `load_lock()` verifies
+schemas and content before returning `(inputs, opts)`; it offers no extras or
+default-filling policies. Content or key mismatches raise `DigestMismatchError`,
+schema mismatches raise `SchemaMismatchError`, malformed metadata raises
+`StorageFormatError`, and missing files raise `FileNotFoundError`.
+
+All three files are prepared before replacing any destination, and the lockfile
+is published last. Each replacement is atomic; the group is not a filesystem
+transaction. Parent directories must already exist, destinations must be
+distinct, and older lockfiles remain in place. Editing either referenced file
+requires a new lockfile. Both `save()` and `save_locked()` forward all function
+keyword arguments, including one named `lockfile`.
+
 ## JAX arrays and random keys
 
 Install the optional integration (JAX 0.11.2 or newer):

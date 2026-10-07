@@ -27,3 +27,7 @@ class SerializerContractError(ThunkError, ValueError):
 
 class OutputCodecError(ThunkError, TypeError):
     """No supported output codec can be derived from the return annotation."""
+
+
+class DigestMismatchError(ThunkError, ValueError):
+    """Stored content or the combined key disagrees with its lockfile."""

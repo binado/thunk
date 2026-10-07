@@ -37,7 +37,7 @@ _NONFINITE = {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf}
 
 
 def write_envelope(
-    f: h5py.File, kind: str, fingerprints: Mapping[str, str], **extra: str
+    f: h5py.File, kind: str, fingerprints: Mapping[str, str], **extra: str | int
 ) -> None:
     f.attrs["thunk_format"] = kind
     f.attrs["storage_version"] = STORAGE_VERSION
@@ -304,7 +304,11 @@ def _indexed(g: h5py.Group, where: str) -> list[Any]:
     return [g[n] for n in order]
 
 
-def read_node(obj: Any, node: Node, where: str) -> Any:
+def read_node(obj: Any, node: Node, where: str, *, serialized: bool = False) -> Any:
+    """Read values, retaining custom trees and field mappings in serialized mode.
+
+    Serialized mode avoids user validators and constructors for lock verification.
+    """
     match node:
         case Scalar(type=tp):
             return _read_scalar(_expect_group(obj, "scalar", where), tp, where)
@@ -341,17 +345,17 @@ def read_node(obj: Any, node: Node, where: str) -> Any:
         case OptionalNode(inner=inner):
             if isinstance(obj, h5py.Group) and _attr(obj, "kind", where) == "none":
                 return None
-            return read_node(obj, inner, where)
+            return read_node(obj, inner, where, serialized=serialized)
         case ListNode(inner=inner):
             g = _expect_group(obj, "list", where)
             return [
-                read_node(c, inner, f"{where}[{i}]")
+                read_node(c, inner, f"{where}[{i}]", serialized=serialized)
                 for i, c in enumerate(_indexed(g, where))
             ]
         case VarTupleNode(inner=inner):
             g = _expect_group(obj, "tuple", where)
             return tuple(
-                read_node(c, inner, f"{where}[{i}]")
+                read_node(c, inner, f"{where}[{i}]", serialized=serialized)
                 for i, c in enumerate(_indexed(g, where))
             )
         case FixedTupleNode(items=items):
@@ -362,7 +366,7 @@ def read_node(obj: Any, node: Node, where: str) -> Any:
                     f"{where}: expected {len(items)} tuple items, found {len(children)}"
                 )
             return tuple(
-                read_node(c, sub, f"{where}[{i}]")
+                read_node(c, sub, f"{where}[{i}]", serialized=serialized)
                 for i, (c, sub) in enumerate(zip(children, items, strict=True))
             )
         case DictNode(value=inner):
@@ -371,7 +375,9 @@ def read_node(obj: Any, node: Node, where: str) -> Any:
             result: dict[str, Any] = {}
             for name in g:
                 key = unescape_key(name, where)
-                result[key] = read_node(g[name], inner, f"{where}[{key!r}]")
+                result[key] = read_node(
+                    g[name], inner, f"{where}[{key!r}]", serialized=serialized
+                )
             return result
         case DataclassNode(cls=cls, fields=fields):
             g = _expect_group(obj, "dataclass", where)
@@ -382,13 +388,17 @@ def read_node(obj: Any, node: Node, where: str) -> Any:
                     f"{sorted(expected)}"
                 )
             kwargs = {
-                fname: read_node(g[fname], sub, f"{where}.{fname}")
+                fname: read_node(
+                    g[fname], sub, f"{where}.{fname}", serialized=serialized
+                )
                 for fname, sub in fields
             }
-            return cls(**kwargs)
+            return kwargs if serialized else cls(**kwargs)
         case CustomData(validator=validator):
             g = _expect_group(obj, "custom", where)
             nested = _read_nested(g, where)
+            if serialized:
+                return nested
             result = validator.func(nested)
             try:
                 node.validate(result, where)

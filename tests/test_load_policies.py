@@ -86,20 +86,19 @@ def test_role_mismatch_always_raises(files: tuple[Path, Path]) -> None:
         pfn.load_opts(o, extras="ignore", missing="default")
 
 
-def test_changed_annotation_is_schema_mismatch(files: tuple[Path, Path]) -> None:
+def test_plain_options_validate_current_annotation(files: tuple[Path, Path]) -> None:
     i, o = files
 
     def changed(x: Annotated[list[float], thunk.Data()], n: float = 1.0) -> int:
         return 0
 
     pfn = thunk.fn(changed)
-    with pytest.raises(thunk.SchemaMismatchError, match="'n'"):
-        pfn.load_opts(o)
+    assert pfn.load_opts(o) == {"n": 4.0}
 
     def changed_x(x: Annotated[np.ndarray, thunk.Data()], n: str = "") -> int:
         return 0
 
-    with pytest.raises(thunk.SchemaMismatchError):
+    with pytest.raises(thunk.StorageFormatError):
         thunk.fn(changed_x).load_opts(o)
 
     def array_to_list(x: list[int]) -> int:

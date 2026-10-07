@@ -417,3 +417,14 @@ def test_failed_host_transfer_preserves_destinations(
         p.save(i, o, x)
     assert (i.read_bytes(), o.read_bytes()) == before
     assert sorted(f.name for f in tmp_path.iterdir()) == ["i.h5", "o.json"]
+
+
+def test_locked_key_and_output_path(tmp_path: Path) -> None:
+    def f(x: jax.Array, key: jax.Array, n: int = 1) -> jax.Array:
+        raise AssertionError("must not run")
+
+    p = thunk.fn(f)
+    args = (jax.numpy.arange(4, dtype=jax.numpy.float32), jax.random.key(42))
+    key = p.output_path(*p.flatten(*args))
+    lock = p.save_locked(tmp_path / "i.h5", tmp_path / "o.json", *args)
+    assert p.output_path(*p.load_lock(lock)) == key
