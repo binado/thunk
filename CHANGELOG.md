@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
+### Added
+
+- `FunctionPersistence.output_path()` for content- and schema-derived output
+  filenames without touching the filesystem or executing the function.
+- `FunctionPersistence.cached()` and `thunk.cache()` for content-addressed disk
+  caching. Entries live at `<outdir>/<digest>.h5`, are created on a miss, and are
+  validated against their schema and argument digests on a hit; `refresh=True`
+  recomputes and atomically replaces an entry.
+- `FunctionPersistence.save_locked()` and `load_lock()`, which record each
+  group's relative path, digest, and schema fingerprints in a versioned
+  `<digest>.lock.json` and verify them before restoring.
+
+### Changed
+
+- Options files now contain only serialized option values, dropping the metadata
+  envelope that recorded prior schemas; legacy envelopes are not supported.
+  `load_opts()` still checks names and values against current annotations but
+  cannot detect historical schema changes, so use a lockfile when exact persisted
+  schemas matter.
+
+### Fixed
+
+- New `DigestMismatchError` for content or combined-key disagreements between
+  stored groups and their lockfile or cache key.
+
 ## [0.1.1] - 2026-10-07
 
 ### Added
@@ -34,6 +61,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ThunkError` exception hierarchy.
 - Typed package (`py.typed`) for Python 3.12 to 3.14.
 
-[Unreleased]: https://github.com/binado/thunk/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/binado/thunk/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/binado/thunk/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/binado/thunk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/binado/thunk/releases/tag/v0.1.0
