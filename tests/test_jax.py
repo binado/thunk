@@ -13,7 +13,7 @@ from test_fresh_process import run_fresh
 import thunk
 from thunk import _jax
 from thunk._fingerprint import _Hasher, fingerprint, group_digest
-from thunk._spec import Array, JaxArray, compile_annotation
+from thunk._spec import Node, infer
 
 if TYPE_CHECKING:
     import jax
@@ -100,8 +100,8 @@ def test_key_roundtrip(
         )
     p.save_output(tmp_path / "out.h5", x, inputs={"x": x})
     assert_array(p.load_output(tmp_path / "out.h5"), x)
-    assert group_digest(p._spec.data, {"x": x}) == group_digest(
-        p._spec.data, {"x": restored}
+    assert group_digest({"x": Node("jax_array")}, {"x": x}) == group_digest(
+        {"x": Node("jax_array")}, {"x": restored}
     )
     with h5py.File(path) as f:
         ds = f["inputs/x"]
@@ -133,19 +133,15 @@ def test_nested_and_digests(tmp_path: Path) -> None:
 
 
 def test_annotations_and_schema() -> None:
-    assert compile_annotation(jax.Array) == JaxArray()
-    assert JaxArray().contains_array
-    assert JaxArray().describe() == {"kind": "jax_array"}
-    assert Array().describe() == {"kind": "array"}
-    assert fingerprint("x", "data", JaxArray()) != fingerprint("x", "data", Array())
-    for annotation in (jax.typing.ArrayLike, jax.Array | np.ndarray):
-        with pytest.raises(thunk.SpecError):
-            compile_annotation(annotation)
+    assert infer(jax.numpy.ones(2), "x").kind == "jax_array"
+    assert fingerprint("x", "data", Node("jax_array")) != fingerprint(
+        "x", "data", Node("array")
+    )
 
     def static(x: Annotated[jax.Array, thunk.Static()]) -> None: ...
 
-    with pytest.raises(thunk.SpecError, match="Static but contains arrays"):
-        thunk.fn(static)
+    with pytest.raises(thunk.ValueTypeError, match="Static"):
+        thunk.fn(static).flatten(jax.numpy.ones(2))
 
 
 def test_jit_and_flatten_do_not_execute_or_transfer(
@@ -166,7 +162,7 @@ def test_jit_and_flatten_do_not_execute_or_transfer(
             m.setattr(jax, "device_get", forbidden)
             inputs, _ = p.flatten(x)
             assert inputs["x"] is x
-            JaxArray().validate(x, "x")
+            infer(x, "x")
         p.save_inputs(tmp_path / "i.h5", inputs)
         assert_array(p.load_inputs(tmp_path / "i.h5")["x"], x)
 
@@ -174,7 +170,6 @@ def test_jit_and_flatten_do_not_execute_or_transfer(
 @pytest.mark.parametrize(
     "kind",
     [
-        "numpy",
         "weak",
         "deleted",
         "bfloat16",
@@ -221,11 +216,10 @@ def test_invalid_arrays_preserve_files(
     assert sorted(f.name for f in tmp_path.iterdir()) == ["i.h5", "o.json"]
 
 
-def test_wrong_numpy_type_and_nested_path(tmp_path: Path) -> None:
+def test_array_identity_and_nested_error_path(tmp_path: Path) -> None:
     def numpy_only(x: np.ndarray) -> None: ...
 
-    with pytest.raises(thunk.ValueTypeError, match="x: expected numpy.ndarray"):
-        thunk.fn(numpy_only).save_inputs(tmp_path / "i.h5", {"x": jax.numpy.ones(2)})
+    thunk.fn(numpy_only).save_inputs(tmp_path / "i.h5", {"x": jax.numpy.ones(2)})
     value = (Mixed(np.ones(2), {"bad": [jax.numpy.asarray(1)]}, ()), None)
     with pytest.raises(
         thunk.ValueTypeError, match=r"x\[0\].arrays\['bad'\]\[0\]:.*weakly"
@@ -241,9 +235,9 @@ def test_legacy_key_and_digest_tags(tmp_path: Path) -> None:
     with h5py.File(tmp_path / "i.h5") as f:
         assert f["inputs/x"].attrs["jax_kind"] == "array"
     values = [
-        (Array(), np.asarray(x)),
-        (JaxArray(), x),
-        (JaxArray(), jax.random.key(0)),
+        (Node("array"), np.asarray(x)),
+        (Node("jax_array"), x),
+        (Node("jax_array"), jax.random.key(0)),
     ]
     digests = []
     for node, value in values:
@@ -253,8 +247,10 @@ def test_legacy_key_and_digest_tags(tmp_path: Path) -> None:
     assert len(set(digests)) == 3
     # Same bits and shape, different RNG algorithm.
     assert group_digest(
-        p._spec.data, {"x": jax.random.key(0, impl="rbg")}
-    ) != group_digest(p._spec.data, {"x": jax.random.key(0, impl="unsafe_rbg")})
+        {"x": Node("jax_array")}, {"x": jax.random.key(0, impl="rbg")}
+    ) != group_digest(
+        {"x": Node("jax_array")}, {"x": jax.random.key(0, impl="unsafe_rbg")}
+    )
 
 
 @pytest.mark.parametrize(
@@ -315,17 +311,15 @@ def test_malformed_storage(tmp_path: Path, corruption: str) -> None:
         p.load_inputs(path)
 
 
-def test_schema_mismatch(tmp_path: Path) -> None:
+def test_stored_array_identity_overrides_hints(tmp_path: Path) -> None:
     def numpy_only(x: np.ndarray) -> np.ndarray:
         raise AssertionError
 
     path = tmp_path / "i.h5"
     thunk.fn(numpy_only).save_inputs(path, {"x": np.ones(2)})
-    with pytest.raises(thunk.SchemaMismatchError):
-        thunk.fn(never_run).load_inputs(path)
+    assert isinstance(thunk.fn(never_run).load_inputs(path)["x"], np.ndarray)
     thunk.fn(never_run).save_inputs(path, {"x": jax.numpy.ones(2)})
-    with pytest.raises(thunk.SchemaMismatchError):
-        thunk.fn(numpy_only).load_inputs(path)
+    assert isinstance(thunk.fn(numpy_only).load_inputs(path)["x"], jax.Array)
 
 
 def test_x64_fresh_processes(tmp_path: Path) -> None:

@@ -44,20 +44,22 @@ def test_extras_forbid_and_ignore(files: tuple[Path, Path]) -> None:
 def test_missing_raise_default_and_warn(files: tuple[Path, Path]) -> None:
     i, o = files
     pfn = thunk.fn(v2_default_only)
+    assert pfn.load_opts(o) == {"n": 4}
+    assert pfn.load_opts(o, missing="default") == {"n": 4}
     with pytest.raises(thunk.SchemaMismatchError, match="extra"):
-        pfn.load_opts(o)
-    with pytest.warns(UserWarning, match="extra"):
-        opts = pfn.load_opts(o, missing="default")
-    assert opts == {"n": 4, "extra": 9}
+        pfn.load(inputs=i, opts=o)
     with pytest.warns(UserWarning):
         args, kwargs = pfn.load(inputs=i, opts=o, missing="default")
     assert kwargs["extra"] == 9 and kwargs["n"] == 4
 
 
 def test_missing_without_default_still_raises(files: tuple[Path, Path]) -> None:
-    _, o = files
-    with pytest.raises(thunk.SchemaMismatchError, match="req"):
-        thunk.fn(v2).load_opts(o, missing="default")
+    i, o = files
+    with (
+        pytest.warns(UserWarning),
+        pytest.raises(thunk.SchemaMismatchError, match="req"),
+    ):
+        thunk.fn(v2).load(inputs=i, opts=o, missing="default")
 
 
 def test_bad_policy_values(files: tuple[Path, Path]) -> None:
@@ -86,7 +88,7 @@ def test_role_mismatch_always_raises(files: tuple[Path, Path]) -> None:
         pfn.load_opts(o, extras="ignore", missing="default")
 
 
-def test_plain_options_validate_current_annotation(files: tuple[Path, Path]) -> None:
+def test_ordinary_annotations_do_not_validate_storage(files: tuple[Path, Path]) -> None:
     i, o = files
 
     def changed(x: Annotated[list[float], thunk.Data()], n: float = 1.0) -> int:
@@ -98,21 +100,20 @@ def test_plain_options_validate_current_annotation(files: tuple[Path, Path]) -> 
     def changed_x(x: Annotated[np.ndarray, thunk.Data()], n: str = "") -> int:
         return 0
 
-    with pytest.raises(thunk.StorageFormatError):
-        thunk.fn(changed_x).load_opts(o)
+    assert type(thunk.fn(changed_x).load_opts(o)["n"]) is int
 
     def array_to_list(x: list[int]) -> int:
         return 0
 
-    with pytest.raises(thunk.SchemaMismatchError):
-        thunk.fn(array_to_list).load_inputs(i, extras="ignore")
+    assert isinstance(
+        thunk.fn(array_to_list).load_inputs(i, extras="ignore")["x"], np.ndarray
+    )
 
 
 def test_fingerprint_compared_only_over_stored_names(files: tuple[Path, Path]) -> None:
     _, o = files
     # `extra` added later with a different annotation never mattered to the file
-    with pytest.warns(UserWarning):
-        thunk.fn(v2_default_only).load_opts(o, missing="default")
+    assert thunk.fn(v2_default_only).load_opts(o, missing="default") == {"n": 4}
 
 
 def test_wrong_file_kind(files: tuple[Path, Path], tmp_path: Path) -> None:
@@ -183,7 +184,7 @@ def test_output_roundtrip_and_digests(tmp_path: Path) -> None:
         assert "inputs_digest" not in f.attrs
 
 
-def test_output_codec_errors(tmp_path: Path) -> None:
+def test_outputs_need_no_supported_return_annotation(tmp_path: Path) -> None:
     def no_ann(x: int): ...  # noqa: ANN201
 
     def bad(x: int) -> object: ...
@@ -193,16 +194,14 @@ def test_output_codec_errors(tmp_path: Path) -> None:
     for func in (no_ann, bad):
         pfn = thunk.fn(func)  # input persistence must still work
         pfn.save_opts(tmp_path / "o.json", {"x": 1})
-        with pytest.raises(thunk.OutputCodecError):
-            pfn.save_output(tmp_path / "x.h5", None)
-        with pytest.raises(thunk.OutputCodecError):
-            pfn.load_output(tmp_path / "x.h5")
+        pfn.save_output(tmp_path / "x.h5", None)
+        assert pfn.load_output(tmp_path / "x.h5") is None
     pfn = thunk.fn(none)
     pfn.save_output(tmp_path / "n.h5", None)
     assert pfn.load_output(tmp_path / "n.h5") is None
 
 
-def test_output_structured_and_schema_check(tmp_path: Path) -> None:
+def test_output_uses_stored_structure(tmp_path: Path) -> None:
     def a(x: int) -> tuple[np.ndarray, float]:
         raise NotImplementedError
 
@@ -213,17 +212,14 @@ def test_output_structured_and_schema_check(tmp_path: Path) -> None:
     thunk.fn(a).save_output(p, (np.arange(2), math.nan))
     arr, nan = thunk.fn(a).load_output(p)
     assert math.isnan(nan) and arr.tolist() == [0, 1]
-    with pytest.raises(thunk.SchemaMismatchError):
-        thunk.fn(b).load_output(p)
-    with pytest.raises(thunk.ValueTypeError):
-        thunk.fn(a).save_output(p, [np.arange(2), 1.0])  # ty: ignore[invalid-argument-type]
+    assert isinstance(thunk.fn(b).load_output(p)[0], np.ndarray)
+    thunk.fn(a).save_output(p, [np.arange(2), 1.0])  # ty: ignore[invalid-argument-type]
+    assert isinstance(thunk.fn(a).load_output(p), list)
 
 
 def test_save_input_validation(tmp_path: Path) -> None:
     pfn = thunk.fn(v1)
-    with pytest.raises(thunk.ValueTypeError):
-        pfn.save_inputs(tmp_path / "i.h5", {"x": [1, 2]})
+    pfn.save_inputs(tmp_path / "i.h5", {"x": [1, 2]})
     with pytest.raises(TypeError, match="unknown"):
         pfn.save_inputs(tmp_path / "i.h5", {"x": np.zeros(1), "z": 1})
-    with pytest.raises(TypeError, match="missing"):
-        pfn.save_opts(tmp_path / "o.json", {})
+    pfn.save_opts(tmp_path / "o.json", {})

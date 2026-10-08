@@ -17,10 +17,13 @@ class DataSerializer:
 
 
 @dataclass(frozen=True)
-class DataValidator:
+class DataDeserializer:
     """Rebuild a value from the nested dictionary a ``DataSerializer`` produced."""
 
     func: Callable[[dict[str, Any]], Any]
+
+
+DataValidator = DataDeserializer
 
 
 def _both_or_neither(marker: str, serializer: object, validator: object) -> None:

@@ -93,7 +93,7 @@ def test_save_leaves_both_destinations_untouched_on_encode_failure(
     pfn.save(i, o, np.zeros(2), 1)
     before = (i.read_bytes(), o.read_bytes())
     with pytest.raises(thunk.ValueTypeError):
-        pfn.save(i, o, np.ones(2), "bad")  # opts fail after inputs encoded
+        pfn.save(i, o, np.ones(2), object())  # unsupported runtime value
     assert (i.read_bytes(), o.read_bytes()) == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["i.h5", "o.json"]
 

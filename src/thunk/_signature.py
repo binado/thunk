@@ -1,5 +1,7 @@
-"""Signature compilation, role resolution, and argument binding."""
+"""Signature inspection independent of runtime storage inference."""
 
+import ast
+import dataclasses
 import functools
 import inspect
 import sys
@@ -7,17 +9,11 @@ import types
 import typing
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, get_origin
+from typing import Annotated, Any, Literal, get_args, get_origin
 
-from ._errors import OutputCodecError, SpecError
+from ._errors import SpecError, ValueTypeError
 from ._markers import ROLE_MARKERS, Data, Skip, Static
-from ._spec import (
-    CustomData,
-    CustomStatic,
-    Node,
-    NoneNode,
-    compile_annotation,
-)
+from ._spec import infer
 
 Role = Literal["data", "static", "skip"]
 EMPTY = inspect.Parameter.empty
@@ -28,11 +24,9 @@ class Param:
     name: str
     kind: inspect._ParameterKind
     default: Any
-    role: Role
-    node: Node | None
-    # Static only: the annotation handed to pydantic (base type + non-role metadata
-    # + custom serializer/validator).
-    pydantic_annotation: Any = None
+    role: Role | None
+    hint: Any = Any
+    marker: Any = None
 
     @property
     def has_default(self) -> bool:
@@ -67,72 +61,103 @@ def _split_roles(annotation: Any) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]
     return annotation.__origin__, roles, others
 
 
-def _raw_skip(raw: Any) -> bool:
-    """Detect ``Annotated[<unresolvable>, Skip()]`` without resolving the base."""
-    return get_origin(raw) is Annotated and any(
-        isinstance(m, Skip) for m in raw.__metadata__
-    )
+def _annotation(raw: Any, ns: dict[str, Any]) -> Any:
+    if raw is EMPTY:
+        return Any
+    try:
+        return _resolve(raw, ns)
+    except Exception:
+        if get_origin(raw) is Annotated:
+            return raw
+        if not isinstance(raw, str):
+            return raw
+        try:
+            expr = ast.parse(raw, mode="eval").body
+        except SyntaxError:
+            return raw
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return _annotation(expr.value, ns)
+        # Inspect Annotated metadata independently of unresolved ordinary types.
+        # Walking the base as well preserves nested-marker errors even when
+        # resolving its ordinary forward references failed.
+        result = raw
+        for sub in ast.walk(expr):
+            if not isinstance(sub, ast.Subscript) or not isinstance(
+                sub.slice, ast.Tuple
+            ):
+                continue
+            try:
+                outer = eval(
+                    compile(ast.Expression(sub.value), "<annotation>", "eval"), ns
+                )
+            except Exception:
+                continue
+            if outer is not Annotated:
+                continue
+            try:
+                meta = [
+                    eval(compile(ast.Expression(e), "<annotation>", "eval"), ns)
+                    for e in sub.slice.elts[1:]
+                ]
+            except Exception as exc:
+                raise SpecError(f"cannot resolve persistence metadata: {raw}") from exc
+            if sub is expr:
+                result = Annotated[Any, *meta]
+            elif any(isinstance(m, ROLE_MARKERS) for m in meta):
+                raise SpecError(
+                    "role markers are only allowed on a top-level annotation"
+                )
+        return result
+
+
+def _nested(hint: Any, seen: tuple[int, ...] = ()) -> None:
+    if id(hint) in seen:
+        return
+    seen = (*seen, id(hint))
+    if isinstance(hint, typing.TypeAliasType):
+        _nested(hint.__value__, seen)
+    if isinstance(hint, type) and dataclasses.is_dataclass(hint):
+        for raw in getattr(hint, "__annotations__", {}).values():
+            _nested(_annotation(raw, _namespace(hint)), seen)
+    if get_origin(hint) is Annotated and any(
+        isinstance(m, ROLE_MARKERS) for m in hint.__metadata__
+    ):
+        raise SpecError("role markers are only allowed on a top-level annotation")
+    for arg in get_args(hint):
+        _nested(arg, seen)
 
 
 def _compile_param(p: inspect.Parameter, globalns: dict[str, Any], owner: str) -> Param:
-    name = p.name
-    raw = p.annotation
     if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-        raise SpecError(f"{owner}: *args/**kwargs parameter {name!r} is not supported")
-
-    if raw is EMPTY:
         raise SpecError(
-            f"{owner}: parameter {name!r} needs a type annotation "
-            "(or mark it Annotated[..., thunk.Skip()])"
+            f"{owner}: *args/**kwargs parameter {p.name!r} is not supported"
         )
-    try:
-        annotation = _resolve(raw, globalns)
-    except Exception as exc:
-        if _raw_skip(raw):
-            return Param(name, p.kind, p.default, "skip", None)
-        raise SpecError(
-            f"{owner}: cannot resolve annotation of parameter {name!r}: {exc}"
-        ) from exc
-
-    base, roles, others = _split_roles(annotation)
+    annotation = _annotation(p.annotation, globalns)
+    seen_aliases = set()
+    while (
+        isinstance(annotation, typing.TypeAliasType)
+        and id(annotation) not in seen_aliases
+    ):
+        seen_aliases.add(id(annotation))
+        annotation = annotation.__value__
+    hint, roles, _ = _split_roles(annotation)
     if len(roles) > 1:
-        raise SpecError(f"{owner}: parameter {name!r} has more than one role marker")
+        raise SpecError(f"{owner}: parameter {p.name!r} has more than one role marker")
+    _nested(hint)
     marker = roles[0] if roles else None
-
-    if isinstance(marker, Skip):
-        return Param(name, p.kind, p.default, "skip", None)
-
-    try:
-        if isinstance(marker, Data) and marker.serializer is not None:
-            node: Node = CustomData(base, marker.serializer, marker.validator)
-            return Param(name, p.kind, p.default, "data", node)
-        if isinstance(marker, Static) and marker.serializer is not None:
-            node = CustomStatic(base, marker.serializer, marker.validator)
-            pyd = Annotated[base, *others, marker.serializer, marker.validator]
-            return Param(name, p.kind, p.default, "static", node, pyd)
-
-        node = compile_annotation(base)
-    except SpecError as exc:
-        raise SpecError(f"{owner}: parameter {name!r}: {exc}") from exc
-
-    if isinstance(marker, Static):
-        role: Role = "static"
-        if node.contains_array:
-            raise SpecError(
-                f"{owner}: parameter {name!r} is marked Static but contains arrays"
-            )
-    elif isinstance(marker, Data):
-        role = "data"
-    else:
-        role = "data" if node.contains_array else "static"
-
-    pyd = Annotated[base, *others] if others else base
-    return Param(name, p.kind, p.default, role, node, pyd if role == "static" else None)
+    role: Role | None = (
+        "data"
+        if isinstance(marker, Data)
+        else "static"
+        if isinstance(marker, Static)
+        else "skip"
+        if isinstance(marker, Skip)
+        else None
+    )
+    return Param(p.name, p.kind, p.default, role, hint, marker)
 
 
 class CallSpec:
-    """Compiled view of a callable's signature, split by argument role."""
-
     def __init__(self, function: Callable[..., Any]) -> None:
         if not callable(function):
             raise SpecError(f"thunk.fn expects a callable, got {function!r}")
@@ -140,66 +165,73 @@ class CallSpec:
         self.name = getattr(function, "__qualname__", repr(function))
         try:
             self.signature = inspect.signature(function)
-        except (TypeError, ValueError) as exc:
-            raise SpecError(f"{self.name}: cannot inspect signature: {exc}") from exc
-
-        target = _hint_target(function)
-        globalns = _namespace(target)
-        self.params: tuple[Param, ...] = tuple(
-            _compile_param(p, globalns, self.name)
-            for p in self.signature.parameters.values()
+        except (ValueError, TypeError) as exc:
+            raise SpecError(f"cannot inspect signature: {exc}") from exc
+        ns = _namespace(_hint_target(function))
+        self.params = tuple(
+            _compile_param(p, ns, self.name) for p in self.signature.parameters.values()
         )
         self.by_name = {p.name: p for p in self.params}
         self.data = tuple(p for p in self.params if p.role == "data")
         self.static = tuple(p for p in self.params if p.role == "static")
         self.skip = tuple(p for p in self.params if p.role == "skip")
+        self.output = _compile_param(
+            inspect.Parameter(
+                "output",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=self.signature.return_annotation,
+            ),
+            ns,
+            self.name,
+        )
+        if self.output.role == "skip":
+            raise SpecError("return Skip is not supported")
 
-        self.output_node: Node | None = None
-        self.output_error: Exception | None = None
-        self._compile_output(globalns)
-
-    def _compile_output(self, globalns: dict[str, Any]) -> None:
-        raw = self.signature.return_annotation
-        if raw is inspect.Signature.empty:
-            self.output_error = SpecError(f"{self.name}: no return annotation")
-            return
-        try:
-            tp = _resolve(raw, globalns)
-            self.output_node = NoneNode() if tp is None else compile_annotation(tp)
-        except Exception as exc:
-            self.output_error = exc
-
-    def require_output(self) -> Node:
-        if self.output_node is None:
-            raise OutputCodecError(
-                f"{self.name}: cannot derive an output codec: {self.output_error}"
-            ) from self.output_error
-        return self.output_node
-
-    # -- binding ---------------------------------------------------------
+    def role(self, p: Param, value: Any) -> str:
+        if p.role == "skip":
+            return "skip"
+        if p.marker is not None and p.marker.serializer is not None:
+            return str(p.role)
+        node = infer(value, p.name)
+        if p.role == "static" and node.contains_array:
+            raise ValueTypeError(
+                f"{p.name}: Static requires finite JSON without arrays"
+            )
+        return p.role or ("data" if node.contains_array else "static")
 
     def bind(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        values = bound.arguments
-        inputs = {p.name: values[p.name] for p in self.data}
-        opts = {p.name: values[p.name] for p in self.static}
+        inputs, opts = {}, {}
+        for p in self.params:
+            value = bound.arguments[p.name]
+            role = self.role(p, value)
+            if role != "skip":
+                (inputs if role == "data" else opts)[p.name] = value
         return inputs, opts
 
-    def check_names(
-        self, group: Mapping[str, Any], params: tuple[Param, ...], label: str
-    ) -> None:
-        expected = {p.name for p in params}
-        unknown = [k for k in group if k not in expected]
-        missing = [n for n in expected if n not in group]
-        if unknown or missing:
-            raise TypeError(
-                f"{self.name}: {label} mismatch"
-                + (f"; unknown: {unknown}" if unknown else "")
-                + (f"; missing: {sorted(missing)}" if missing else "")
-            )
+    def check_group(self, values: Mapping[str, Any], role: str) -> None:
+        for name in values:
+            p = self.by_name.get(name)
+            if p is None or p.role not in (None, role):
+                raise TypeError(
+                    f"{self.name}: unknown or role-mismatched {role} parameter {name!r}"
+                )
+
+    def check_pair(self, inputs: Mapping[str, Any], opts: Mapping[str, Any]) -> None:
+        self.check_group(inputs, "data")
+        self.check_group(opts, "static")
+        if set(inputs) & set(opts):
+            raise TypeError("duplicate names in inputs and opts")
+        missing = [
+            p.name
+            for p in self.params
+            if p.role != "skip" and p.name not in inputs and p.name not in opts
+        ]
+        if missing:
+            raise TypeError(f"missing persisted parameters: {missing}")
 
     def merge(
         self,
@@ -207,42 +239,35 @@ class CallSpec:
         opts: Mapping[str, Any],
         skipped: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        self.check_names(inputs, self.data, "inputs")
-        self.check_names(opts, self.static, "opts")
+        self.check_pair(inputs, opts)
         skipped = skipped or {}
-        skip_names = {p.name for p in self.skip}
-        bad = [k for k in skipped if k not in skip_names]
-        if bad:
-            raise TypeError(
-                f"{self.name}: `skipped` only accepts Skip parameters, got {bad}"
-            )
-        merged: dict[str, Any] = {}
-        for p in self.params:
-            if p.role == "data":
-                merged[p.name] = inputs[p.name]
-            elif p.role == "static":
-                merged[p.name] = opts[p.name]
-            elif p.name in skipped:
+        if set(skipped) - {p.name for p in self.skip}:
+            raise TypeError("`skipped` only accepts Skip parameters")
+        merged = dict(inputs) | dict(opts)
+        for p in self.skip:
+            if p.name in skipped:
                 merged[p.name] = skipped[p.name]
             elif p.has_default:
                 merged[p.name] = p.default
             else:
-                raise TypeError(
-                    f"{self.name}: missing required skipped parameter {p.name!r}"
-                )
+                raise TypeError(f"missing required skipped parameter {p.name!r}")
         return merged
 
     def to_call(
         self, values: Mapping[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        args: list[Any] = []
-        kwargs: dict[str, Any] = {}
-        for p in self.params:
-            if p.kind is inspect.Parameter.POSITIONAL_ONLY:
-                args.append(values[p.name])
-            else:
-                kwargs[p.name] = values[p.name]
-        return tuple(args), kwargs
+        return (
+            tuple(
+                values[p.name]
+                for p in self.params
+                if p.kind is inspect.Parameter.POSITIONAL_ONLY
+            ),
+            {
+                p.name: values[p.name]
+                for p in self.params
+                if p.kind is not inspect.Parameter.POSITIONAL_ONLY
+            },
+        )
 
 
 def _hint_target(function: Callable[..., Any]) -> Any:

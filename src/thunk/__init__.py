@@ -5,6 +5,7 @@ from importlib.metadata import version
 from ._errors import (
     DigestMismatchError,
     OutputCodecError,
+    ReconstructionError,
     SchemaMismatchError,
     SerializerContractError,
     SpecError,
@@ -12,7 +13,14 @@ from ._errors import (
     ThunkError,
     ValueTypeError,
 )
-from ._markers import Data, DataSerializer, DataValidator, Skip, Static
+from ._markers import (
+    Data,
+    DataDeserializer,
+    DataSerializer,
+    DataValidator,
+    Skip,
+    Static,
+)
 from ._persistence import Extras, FunctionPersistence, Missing, cache, fn
 
 __version__ = version("thunk")
@@ -20,12 +28,14 @@ __version__ = version("thunk")
 __all__ = [
     "Data",
     "DataSerializer",
+    "DataDeserializer",
     "DataValidator",
     "DigestMismatchError",
     "Extras",
     "FunctionPersistence",
     "Missing",
     "OutputCodecError",
+    "ReconstructionError",
     "SchemaMismatchError",
     "SerializerContractError",
     "Skip",
