@@ -12,8 +12,9 @@ pip install thunk
 
 ## Usage
 
-`thunk.fn` derives save/load methods from a callable's type annotations. It
-inspects the signature and never runs the function body.
+`thunk.fn` inspects a callable's signature without running its body or checking
+default values. Actual argument values determine storage on each operation;
+annotations are optional hints for reconstruction when loading.
 
 ```python
 from dataclasses import dataclass
@@ -66,28 +67,72 @@ Roles decide where each parameter is stored:
 
 | Role | Group | Storage |
 | --- | --- | --- |
-| `Data()` (default when the annotation contains arrays) | `inputs` | HDF5 |
-| `Static()` (default otherwise) | `opts` | JSON, via pydantic |
+| `Data()` (inferred for values containing arrays or nonfinite floats) | `inputs` | HDF5 |
+| `Static()` (inferred for other supported values) | `opts` | Plain finite JSON |
 | `Skip()` | neither | supplied at call time |
 
-Supported annotations: `bool`, `int`, `float`, `str`, `None`, `np.ndarray`,
-`jax.Array` (with the JAX extra), `Literal[...]`, `T | None`, `list[T]`, `tuple[...]`, `dict[str, T]`, and
-dataclasses of those. Values are validated strictly (no `int` → `float`, no
-`list` ↔ `tuple`). Types outside that set can use
-`Data(DataSerializer(...), DataValidator(...))` or
-`Static(PlainSerializer(...), PlainValidator(...))`.
+Supported runtime values are `bool`, `int`, `float`, `str`, `None`, NumPy/JAX
+arrays, lists, tuples, string-keyed dictionaries, and dataclasses containing
+these values. Containers may be empty or heterogeneous. Cycles, unsupported
+objects or dictionary keys, and dataclass `InitVar` / `init=False` fields are
+rejected with a nested path. Ordinary annotations (including `Any`, unresolved
+forward references, unions, and scalar constraints) do not validate values.
+Variadic parameters and nested or conflicting persistence markers are rejected.
+
+Explicit roles override inference. `Static()` requires finite JSON values and
+rejects arrays and nonfinite floats. Custom codecs can convert otherwise
+unsupported values: use `Data(DataSerializer(...), DataDeserializer(...))` or
+`Static(PlainSerializer(...), PlainValidator(...))`. `DataValidator` remains an
+alias for `DataDeserializer`, and the `validator=` argument remains supported.
+Data serializers return nested dictionaries of scalars and NumPy arrays; Static
+serializers return finite JSON-compatible values. Codecs receive actual values
+without annotation checks; deserializer results are accepted as returned.
+
+JSON tuples become lists and dataclasses become field dictionaries. Compatible
+structural hints can restore tuples and dataclasses recursively, including
+constructor defaults. Optional hints apply to non-`None` values; other unions
+are ignored. Incompatible shapes and unsupported hints leave native decoded
+values unchanged. Scalar values are never coerced. A selected dataclass
+constructor that fails raises `ReconstructionError`. Custom deserializers take
+precedence over hints. HDF5 tags preserve list/tuple and NumPy/JAX array identity;
+dataclasses still require a current hint. No class named in a file is imported.
+Round trips therefore need not preserve the original Python structure without
+appropriate hints or custom codecs.
+
+```python
+def identity(x):
+    return x
+
+
+p = thunk.fn(identity)
+p.flatten(1)  # ({}, {"x": 1})
+p.flatten(np.arange(3))  # ({"x": array(...)}, {})
+p.flatten({"n": float("inf")})  # Data, including nested nonfinite values
+```
+
+`flatten()` applies defaults, drops Skip values, preserves array identity, and
+performs no custom serialization or device transfers. Inference is local to
+each operation: alternating calls cannot change how earlier groups are saved.
+Individual group savers use supplied membership for unmarked parameters and
+check explicit roles, names, and backend compatibility. `__call__()` assembles
+and executes supplied values; it does not reconstruct them.
 
 Loading takes `extras="forbid" | "ignore"` for stored names that are no longer
-parameters and `missing="raise" | "default"` for parameters absent from a file
-(defaults are filled with a warning).
+parameters. Explicit role changes always raise. Individual group loaders check
+absence only for parameters explicitly assigned to that group. `load()` checks
+completeness across both files, rejects duplicate names, and uses
+`missing="raise" | "default"` to either reject absent persisted parameters or
+insert current defaults with a warning. Required parameters without defaults
+still raise. `load_lock()` always requires the exact persisted names.
 
 ## Deterministic output paths and locked inputs
 
-Options files contain only serialized option values (for example,
-`{"seed": 42}`), with no metadata envelope. This intentionally replaces the
-old options format; legacy envelopes are not supported. `load_opts()` checks
-names and values against current annotations, but cannot detect historical
-schema changes. Use a lockfile when exact persisted schemas matter:
+Options files remain plain mappings (for example, `{"seed": 42}`), without a
+metadata envelope. Existing plain JSON can be loaded under the new hint rules.
+HDF5 storage, locks, and content digests now use version 2. Version-1 HDF5 and
+lockfiles are rejected; regenerate them using current thunk. There is no legacy
+reader or migration tool. Use a lockfile to verify concrete representations and
+encoded content before any custom deserializer or dataclass constructor runs:
 
 ```python
 lock_path = pfn.save_locked("inputs.h5", "opts.json", x, params, seed=42)
@@ -102,7 +147,8 @@ pfn.save_output(output_path, result, inputs=inputs, opts=opts)
 `output_path()` validates both groups and returns `<full SHA-256 digest>.h5`,
 optionally under `base_dir`. It never accesses files or executes the function,
 and does not require a supported return annotation. The key includes persisted
-parameter schemas and values, excluding function identity, return annotations,
+concrete roles, runtime structures, codec identities, and values, excluding
+all ordinary annotations and reconstruction hints, function identity,
 `Skip` arguments, and file paths. Use directories such as `simulator-v1` to
 separate computations and revisions. This method does not execute the function or reuse cached results; use
 `cached()` or `thunk.cache()` for that. Hashes are recomputed so mutations are
@@ -115,8 +161,8 @@ representations. When both groups are passed to `save_output()`, its HDF5
 attributes include `digest`, `digest_version`, and the two group digests.
 
 `save_locked()` returns `<digest>.lock.json` beside the options file. Its strict,
-versioned metadata records each group's relative path, digest, and schema
-fingerprints. Paths may contain `..`; relocating the files together preserves
+versioned metadata records each group's relative path, digest, concrete
+representations, codec identities, and fingerprints. Paths may contain `..`; relocating the files together preserves
 the lock. Input HDF5 files also retain their fingerprints. `load_lock()` verifies
 schemas and content before returning `(inputs, opts)`; it offers no extras or
 default-filling policies. Content or key mismatches raise `DigestMismatchError`,
@@ -167,9 +213,14 @@ results. Persist random
 seeds or keys explicitly. Do not mutate inputs during execution, and do not rely
 on side effects being replayed on cache hits.
 
-A supported return annotation is required. Hits validate the output schema and
-recorded argument digests before restoring the result. These digests identify
-inputs; they are not checksums of the output payload. Invalid files, schema or
+Return annotations are optional: output structure is inferred from actual values
+and stored in HDF5. Explicit Data output codecs use the same nested dictionary
+contract; Static output codecs store their finite JSON payload inside HDF5.
+Return `Skip` is rejected. Hits check stored structure, codec compatibility,
+output content integrity, and recorded argument digests before reconstruction.
+Changing reconstruction hints can change a restored cache hit without changing
+its key. Refresh caches or choose a new directory when hint changes require
+different reconstruction behavior. Invalid files, schema or
 digest mismatches, and permission errors propagate rather than triggering
 recomputation. Only absent entries are misses.
 
@@ -195,10 +246,9 @@ uv add 'thunk[jax]'
 pip install 'thunk[jax]'
 ```
 
-Annotate arrays and typed PRNG keys with `jax.Array`. Both infer `Data`,
-including inside the supported containers and dataclasses. NumPy and JAX
-annotations require their respective array types; `jax.typing.ArrayLike` and
-mixed-array unions are unsupported.
+NumPy arrays, JAX arrays, and typed PRNG keys infer `Data` from their runtime
+values, including inside containers and dataclasses. Annotations are optional;
+array identity is determined by stored metadata.
 
 ```python
 import jax
@@ -245,7 +295,7 @@ input content hashing synchronize and transfer array data to the host;
 loading places arrays on JAX's default device. Device placement and sharding
 are not restored. Custom pytrees and distributed checkpointing are outside
 this integration's scope. Importing thunk or compiling NumPy annotations
-does not import JAX, and existing NumPy files remain compatible.
+does not import JAX. Version-1 files must be regenerated as described above.
 
 ## Contributing
 

@@ -10,7 +10,7 @@ class SpecError(ThunkError, TypeError):
 
 
 class ValueTypeError(ThunkError, TypeError):
-    """A runtime value does not match its annotation-derived spec."""
+    """A runtime value violates a storage contract."""
 
 
 class SchemaMismatchError(ThunkError, ValueError):
@@ -26,8 +26,12 @@ class SerializerContractError(ThunkError, ValueError):
 
 
 class OutputCodecError(ThunkError, TypeError):
-    """No supported output codec can be derived from the return annotation."""
+    """The output cannot be persisted with its storage contract."""
 
 
 class DigestMismatchError(ThunkError, ValueError):
     """Stored content or the combined key disagrees with its lockfile or cache key."""
+
+
+class ReconstructionError(ThunkError, ValueError):
+    """An applicable dataclass reconstruction hint failed in its constructor."""
