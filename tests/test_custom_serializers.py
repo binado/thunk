@@ -7,7 +7,7 @@ import pytest
 from pydantic import PlainSerializer, PlainValidator
 
 import thunk
-from thunk._fingerprint import param_fingerprint
+from thunk._spec import codec_identity
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ def test_pair_roundtrip(tmp_path: Path) -> None:
 def test_custom_static_goes_to_opts_and_data_to_inputs() -> None:
     spec = thunk.fn(f)._spec
     assert [p.name for p in spec.data] == ["m"]
-    assert [p.name for p in spec.static] == ["i", "k"]
+    assert [p.name for p in spec.static] == ["i"]
 
 
 def test_fingerprint_includes_codec_names() -> None:
@@ -85,7 +85,7 @@ def test_fingerprint_includes_codec_names() -> None:
 
     a = thunk.fn(f)._spec.by_name["i"]
     b = thunk.fn(g)._spec.by_name["i"]
-    assert param_fingerprint(a) != param_fingerprint(b)
+    assert codec_identity(a.marker) != codec_identity(b.marker)
 
 
 def test_static_marker_validation() -> None:
@@ -176,13 +176,13 @@ def test_empty_nested_dict_and_scalar_types_roundtrip(tmp_path: Path) -> None:
     assert seen["f"] == float("inf") and seen["u"].dtype.kind == "U"
 
 
-def test_wrong_value_type_for_custom_rejected(tmp_path: Path) -> None:
+def test_codec_failure_has_parameter_context(tmp_path: Path) -> None:
     pfn = thunk.fn(f)
-    with pytest.raises(thunk.ValueTypeError):
+    with pytest.raises(thunk.SerializerContractError, match="m: serializer failed"):
         pfn.save_inputs(tmp_path / "i.h5", {"m": "not a mesh"})
 
 
-def test_validator_returning_wrong_type_rejected(tmp_path: Path) -> None:
+def test_deserializer_result_is_not_annotation_validated(tmp_path: Path) -> None:
     def g(
         m: Annotated[
             Mesh,
@@ -195,5 +195,4 @@ def test_validator_returning_wrong_type_rejected(tmp_path: Path) -> None:
 
     pfn = thunk.fn(g)
     pfn.save_inputs(tmp_path / "i.h5", {"m": Mesh(np.zeros(1), "x")})
-    with pytest.raises(thunk.SerializerContractError, match="wrong type"):
-        pfn.load_inputs(tmp_path / "i.h5")
+    assert pfn.load_inputs(tmp_path / "i.h5")["m"] == "not a mesh"

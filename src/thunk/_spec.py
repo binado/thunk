@@ -1,407 +1,328 @@
-"""Compile type annotations into immutable, strictly validating node trees."""
+"""Concrete runtime representations, encoding, and optional reconstruction hints."""
 
 import dataclasses
+import math
+import sys
 import types
 import typing
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, get_args, get_origin
 
 import numpy as np
 
 from . import _jax
-from ._errors import SpecError, ValueTypeError
-from ._markers import ROLE_MARKERS, Data, DataSerializer, DataValidator
+from ._errors import ReconstructionError, SerializerContractError, ValueTypeError
 
 ARRAY_KINDS = frozenset("biufcUS")
-SCALAR_TYPES: tuple[type, ...] = (bool, int, float, str)
-
-Json = Any
 
 
 def qualified_name(obj: Any) -> str:
-    module = getattr(obj, "__module__", None)
-    name = getattr(obj, "__qualname__", None) or repr(obj)
-    return f"{module}.{name}" if module else name
+    return f"{getattr(obj, '__module__', '')}.{getattr(obj, '__qualname__', type(obj).__qualname__)}"
 
 
-def _describe_type(tp: Any) -> str:
-    return qualified_name(tp) if isinstance(tp, type) else repr(tp)
-
-
-def _fail(path: str, expected: str, value: Any) -> typing.NoReturn:
-    raise ValueTypeError(
-        f"{path}: expected {expected}, got {type(value).__name__} ({value!r:.60})"
-    )
-
-
+@dataclass(frozen=True)
 class Node:
-    """Base class: one compiled annotation."""
+    kind: str
+    children: tuple[tuple[str, "Node"], ...] = ()
+    type: str | None = None
 
     @property
     def contains_array(self) -> bool:
-        return False
-
-    def validate(self, value: Any, path: str) -> None:
-        raise NotImplementedError
-
-    def describe(self) -> Json:
-        raise NotImplementedError
-
-
-@dataclass(frozen=True)
-class Scalar(Node):
-    type: type
-
-    def validate(self, value: Any, path: str) -> None:
-        if type(value) is not self.type:
-            _fail(path, self.type.__name__, value)
-
-    def describe(self) -> Json:
-        return {"kind": "scalar", "type": self.type.__name__}
-
-
-@dataclass(frozen=True)
-class NoneNode(Node):
-    def validate(self, value: Any, path: str) -> None:
-        if value is not None:
-            _fail(path, "None", value)
-
-    def describe(self) -> Json:
-        return {"kind": "none"}
-
-
-@dataclass(frozen=True)
-class Array(Node):
-    @property
-    def contains_array(self) -> bool:
-        return True
-
-    def validate(self, value: Any, path: str) -> None:
-        if not isinstance(value, np.ndarray):
-            _fail(path, "numpy.ndarray", value)
-        if value.dtype.kind not in ARRAY_KINDS:
-            raise ValueTypeError(f"{path}: unsupported array dtype {value.dtype}")
-
-    def describe(self) -> Json:
-        return {"kind": "array"}
-
-
-@dataclass(frozen=True)
-class JaxArray(Node):
-    @property
-    def contains_array(self) -> bool:
-        return True
-
-    def validate(self, value: Any, path: str) -> None:
-        _jax.validate(value, path)
-
-    def describe(self) -> Json:
-        return {"kind": "jax_array"}
-
-
-@dataclass(frozen=True)
-class LiteralNode(Node):
-    values: tuple[Any, ...]
-
-    def validate(self, value: Any, path: str) -> None:
-        if not any(type(value) is type(v) and value == v for v in self.values):
-            _fail(path, f"one of {list(self.values)!r}", value)
-
-    def describe(self) -> Json:
-        return {
-            "kind": "literal",
-            "values": [[type(v).__name__, v] for v in self.values],
-        }
-
-
-@dataclass(frozen=True)
-class OptionalNode(Node):
-    inner: Node
-
-    @property
-    def contains_array(self) -> bool:
-        return self.inner.contains_array
-
-    def validate(self, value: Any, path: str) -> None:
-        if value is not None:
-            self.inner.validate(value, path)
-
-    def describe(self) -> Json:
-        return {"kind": "optional", "inner": self.inner.describe()}
-
-
-@dataclass(frozen=True)
-class ListNode(Node):
-    inner: Node
-
-    @property
-    def contains_array(self) -> bool:
-        return self.inner.contains_array
-
-    def validate(self, value: Any, path: str) -> None:
-        if type(value) is not list:
-            _fail(path, "list", value)
-        for i, item in enumerate(value):
-            self.inner.validate(item, f"{path}[{i}]")
-
-    def describe(self) -> Json:
-        return {"kind": "list", "inner": self.inner.describe()}
-
-
-@dataclass(frozen=True)
-class VarTupleNode(Node):
-    inner: Node
-
-    @property
-    def contains_array(self) -> bool:
-        return self.inner.contains_array
-
-    def validate(self, value: Any, path: str) -> None:
-        if type(value) is not tuple:
-            _fail(path, "tuple", value)
-        for i, item in enumerate(value):
-            self.inner.validate(item, f"{path}[{i}]")
-
-    def describe(self) -> Json:
-        return {"kind": "var_tuple", "inner": self.inner.describe()}
-
-
-@dataclass(frozen=True)
-class FixedTupleNode(Node):
-    items: tuple[Node, ...]
-
-    @property
-    def contains_array(self) -> bool:
-        return any(n.contains_array for n in self.items)
-
-    def validate(self, value: Any, path: str) -> None:
-        if type(value) is not tuple:
-            _fail(path, "tuple", value)
-        if len(value) != len(self.items):
-            raise ValueTypeError(
-                f"{path}: expected tuple of length {len(self.items)}, "
-                f"got length {len(value)}"
-            )
-        for i, (node, item) in enumerate(zip(self.items, value, strict=True)):
-            node.validate(item, f"{path}[{i}]")
-
-    def describe(self) -> Json:
-        return {"kind": "tuple", "items": [n.describe() for n in self.items]}
-
-
-@dataclass(frozen=True)
-class DictNode(Node):
-    value: Node
-
-    @property
-    def contains_array(self) -> bool:
-        return self.value.contains_array
-
-    def validate(self, value: Any, path: str) -> None:
-        if type(value) is not dict:
-            _fail(path, "dict", value)
-        for key, item in value.items():
-            if type(key) is not str:
-                _fail(f"{path}.<key>", "str", key)
-            self.value.validate(item, f"{path}[{key!r}]")
-
-    def describe(self) -> Json:
-        return {"kind": "dict", "value": self.value.describe()}
-
-
-@dataclass(frozen=True)
-class DataclassNode(Node):
-    cls: type
-    fields: tuple[tuple[str, Node], ...]
-
-    @property
-    def contains_array(self) -> bool:
-        return any(n.contains_array for _, n in self.fields)
-
-    def validate(self, value: Any, path: str) -> None:
-        if type(value) is not self.cls:
-            _fail(path, self.cls.__name__, value)
-        for name, node in self.fields:
-            node.validate(getattr(value, name), f"{path}.{name}")
-
-    def describe(self) -> Json:
-        return {
-            "kind": "dataclass",
-            "type": qualified_name(self.cls),
-            "fields": [[name, node.describe()] for name, node in self.fields],
-        }
-
-
-@dataclass(frozen=True)
-class CustomData(Node):
-    """A parameter stored through a user-supplied ``Data`` serializer pair."""
-
-    annotation: Any
-    serializer: DataSerializer
-    validator: DataValidator
-
-    @property
-    def contains_array(self) -> bool:
-        return True
-
-    def validate(self, value: Any, path: str) -> None:
-        if isinstance(self.annotation, type) and not isinstance(value, self.annotation):
-            _fail(path, self.annotation.__name__, value)
-
-    def describe(self) -> Json:
-        return {
-            "kind": "custom_data",
-            "type": _describe_type(self.annotation),
-            "serializer": qualified_name(self.serializer.func),
-            "validator": qualified_name(self.validator.func),
-        }
-
-
-@dataclass(frozen=True)
-class CustomStatic(Node):
-    """A parameter stored through a pydantic serializer/validator pair."""
-
-    annotation: Any
-    serializer: Any
-    validator: Any
-
-    def validate(self, value: Any, path: str) -> None:
-        if isinstance(self.annotation, type) and not isinstance(value, self.annotation):
-            _fail(path, self.annotation.__name__, value)
-
-    def describe(self) -> Json:
-        return {
-            "kind": "custom_static",
-            "type": _describe_type(self.annotation),
-            "serializer": qualified_name(self.serializer.func),
-            "validator": qualified_name(self.validator.func),
-        }
-
-
-def contains_role_marker(metadata: tuple[Any, ...]) -> bool:
-    return any(isinstance(m, ROLE_MARKERS) for m in metadata)
-
-
-def compile_annotation(tp: Any) -> Node:
-    """Compile ``tp`` into a ``Node``; raise ``SpecError`` if unsupported."""
-    return _compile(tp, (), "<annotation>")
-
-
-def _compile(tp: Any, stack: tuple[Any, ...], where: str) -> Node:
-    # PEP 695 aliases
-    if isinstance(tp, typing.TypeAliasType):
-        if tp in stack:
-            raise SpecError(f"{where}: recursive type {tp.__name__} is not supported")
-        return _compile(tp.__value__, (*stack, tp), where)
-
-    origin = get_origin(tp)
-
-    if isinstance(origin, typing.TypeAliasType):
-        # e.g. ``npt.NDArray[np.float64]``: subscripting a PEP 695 alias yields
-        # a GenericAlias whose origin is the alias itself, not the aliased type
-        if origin in stack:
-            raise SpecError(
-                f"{where}: recursive type {origin.__name__} is not supported"
-            )
-        try:
-            resolved = origin.__value__[get_args(tp)]
-        except TypeError as exc:
-            raise SpecError(f"{where}: unsupported annotation {tp!r} ({exc})") from exc
-        return _compile(resolved, (*stack, origin), where)
-
-    if origin is Annotated:
-        meta = tp.__metadata__
-        if contains_role_marker(meta):
-            raise SpecError(
-                f"{where}: role markers (Data/Static/Skip) are only allowed on a "
-                "parameter's top-level annotation"
-            )
-        return _compile(tp.__origin__, stack, where)
-
-    if tp is None or tp is type(None):
-        return NoneNode()
-    if tp in SCALAR_TYPES:
-        return Scalar(tp)
-    if tp is np.ndarray or origin is np.ndarray:
-        return Array()
-    if _jax.is_annotation(tp):
-        return JaxArray()
-    if tp is typing.Any:
-        raise SpecError(f"{where}: Any is not supported")
-
-    if origin is Literal:
-        values = get_args(tp)
-        for v in values:
-            if type(v) not in (bool, int, str):
-                raise SpecError(
-                    f"{where}: Literal values must be bool, int or str, got {v!r}"
-                )
-        return LiteralNode(tuple(values))
-
-    if origin in (Union, types.UnionType):
-        args = get_args(tp)
-        rest = [a for a in args if a is not type(None)]
-        if len(args) == 2 and len(rest) == 1:
-            return OptionalNode(_compile(rest[0], stack, where))
-        raise SpecError(f"{where}: only `T | None` unions are supported, got {tp!r}")
-
-    if origin is list:
-        (inner,) = _args(tp, 1, where)
-        return ListNode(_compile(inner, stack, f"{where}[]"))
-
-    if origin is tuple:
-        args = get_args(tp)
-        if len(args) == 2 and args[1] is Ellipsis:
-            return VarTupleNode(_compile(args[0], stack, f"{where}[]"))
-        if Ellipsis in args:
-            raise SpecError(f"{where}: malformed tuple annotation {tp!r}")
-        return FixedTupleNode(
-            tuple(_compile(a, stack, f"{where}[{i}]") for i, a in enumerate(args))
+        return self.kind in ("array", "jax_array", "nonfinite") or any(
+            n.contains_array for _, n in self.children
         )
 
-    if origin is dict:
-        key, value = _args(tp, 2, where)
-        if key is not str:
-            raise SpecError(f"{where}: dict keys must be str, got {key!r}")
-        return DictNode(_compile(value, stack, f"{where}[]"))
+    def describe(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "type": self.type,
+            "children": [[k, n.describe()] for k, n in self.children],
+        }
 
-    if tp in (list, dict, tuple):
-        raise SpecError(f"{where}: bare {tp.__name__} is not supported; parametrize it")
+    @classmethod
+    def from_description(cls, raw: Any) -> "Node":
+        from ._errors import StorageFormatError
 
-    if origin is None and isinstance(tp, type) and dataclasses.is_dataclass(tp):
-        return _compile_dataclass(tp, stack)
+        try:
+            if not isinstance(raw, dict) or set(raw) != {"kind", "type", "children"}:
+                raise ValueError("invalid representation")
+            kind, tp, children = raw["kind"], raw["type"], raw["children"]
+            if kind not in {
+                "scalar",
+                "none",
+                "nonfinite",
+                "array",
+                "jax_array",
+                "list",
+                "tuple",
+                "dict",
+                "dataclass",
+            }:
+                raise ValueError("unknown representation kind")
+            if tp is not None and not isinstance(tp, str):
+                raise ValueError("invalid representation type")
+            if not isinstance(children, list):
+                raise ValueError("invalid children")
+            pairs = []
+            for pair in children:
+                if (
+                    not isinstance(pair, list)
+                    or len(pair) != 2
+                    or not isinstance(pair[0], str)
+                ):
+                    raise ValueError("invalid child")
+                pairs.append((pair[0], cls.from_description(pair[1])))
+            if len({k for k, _ in pairs}) != len(pairs):
+                raise ValueError("duplicate children")
+            if kind in ("list", "tuple") and [k for k, _ in pairs] != [
+                str(i) for i in range(len(pairs))
+            ]:
+                raise ValueError("invalid sequence")
+            if kind not in ("list", "tuple", "dict", "dataclass") and pairs:
+                raise ValueError("unexpected children")
+            if kind == "scalar" and tp not in ("bool", "int", "float", "str"):
+                raise ValueError("invalid scalar type")
+            if kind == "dataclass" and (not tp or not isinstance(tp, str)):
+                raise ValueError("invalid dataclass name")
+            if kind == "nonfinite" and tp != "float":
+                raise ValueError("invalid nonfinite type")
+            if kind not in ("scalar", "dataclass", "nonfinite") and tp is not None:
+                raise ValueError("unexpected representation type")
+            return cls(kind, tuple(pairs), tp)
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
+            raise StorageFormatError(f"invalid runtime representation: {exc}") from exc
 
-    raise SpecError(f"{where}: unsupported annotation {tp!r}")
+
+def infer(value: Any, path: str, stack: tuple[int, ...] = ()) -> Node:
+    """Inspect values without copying arrays, transferring devices, or running codecs."""
+    if value is None:
+        return Node("none")
+    if type(value) in (bool, int, float, str):
+        kind = (
+            "nonfinite"
+            if type(value) is float and not math.isfinite(value)
+            else "scalar"
+        )
+        return Node(kind, type=type(value).__name__)
+    if isinstance(value, np.ndarray):
+        if value.dtype.kind not in ARRAY_KINDS:
+            raise ValueTypeError(f"{path}: unsupported array dtype {value.dtype}")
+        return Node("array")
+    jax = sys.modules.get("jax")
+    if jax is not None and isinstance(value, jax.Array):
+        _jax.validate(value, path)
+        return Node("jax_array")
+    if id(value) in stack:
+        raise ValueTypeError(f"{path}: cycle in runtime value")
+    stack = (*stack, id(value))
+    if type(value) in (list, tuple):
+        return Node(
+            type(value).__name__,
+            tuple(
+                (str(i), infer(v, f"{path}[{i}]", stack)) for i, v in enumerate(value)
+            ),
+        )
+    if type(value) is dict:
+        children = []
+        for k, v in value.items():
+            if type(k) is not str:
+                raise ValueTypeError(f"{path}.<key>: expected str, got {k!r}")
+            children.append((k, infer(v, f"{path}[{k!r}]", stack)))
+        return Node("dict", tuple(children))
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = dataclasses.fields(value)
+        for field in value.__dataclass_fields__.values():
+            if field._field_type is getattr(dataclasses, "_FIELD_INITVAR"):
+                raise ValueTypeError(
+                    f"{path}.{field.name}: InitVar fields are not supported"
+                )
+        children = []
+        for field in fields:
+            if not field.init:
+                raise ValueTypeError(
+                    f"{path}.{field.name}: init=False fields are not supported"
+                )
+            children.append(
+                (
+                    field.name,
+                    infer(getattr(value, field.name), f"{path}.{field.name}", stack),
+                )
+            )
+        return Node("dataclass", tuple(children), qualified_name(type(value)))
+    raise ValueTypeError(f"{path}: unsupported value type {type(value).__name__}")
 
 
-def _args(tp: Any, n: int, where: str) -> tuple[Any, ...]:
-    args = get_args(tp)
-    if len(args) != n:
-        raise SpecError(f"{where}: unsupported annotation {tp!r}")
-    return args
+def encode(node: Node, value: Any, *, json_mode: bool = False) -> Any:
+    if node.kind in ("list", "tuple"):
+        items = [
+            encode(n, v, json_mode=json_mode)
+            for (_, n), v in zip(node.children, value, strict=True)
+        ]
+        return tuple(items) if node.kind == "tuple" and not json_mode else items
+    if node.kind in ("dict", "dataclass"):
+        return {
+            k: encode(
+                n,
+                getattr(value, k) if node.kind == "dataclass" else value[k],
+                json_mode=json_mode,
+            )
+            for k, n in node.children
+        }
+    return value
 
 
-def _compile_dataclass(cls: Any, stack: tuple[Any, ...]) -> Node:
-    name = qualified_name(cls)
-    if cls in stack:
-        raise SpecError(f"{name}: recursive dataclasses are not supported")
+def validate_payload(
+    node: Node, value: Any, path: str, *, json_mode: bool = False
+) -> None:
+    """Check a decoded payload against its descriptor, without user reconstruction."""
+    from ._errors import StorageFormatError
+
     try:
-        hints = typing.get_type_hints(cls, include_extras=True)
+        if node.kind in ("list", "tuple"):
+            expected = list if json_mode or node.kind == "list" else tuple
+            if type(value) is not expected or len(value) != len(node.children):
+                raise ValueError("sequence shape differs")
+            for (k, sub), v in zip(node.children, value, strict=True):
+                validate_payload(sub, v, f"{path}[{k}]", json_mode=json_mode)
+        elif node.kind in ("dict", "dataclass"):
+            if type(value) is not dict or list(value) != [k for k, _ in node.children]:
+                raise ValueError("fields or field order differ")
+            for k, sub in node.children:
+                validate_payload(sub, value[k], f"{path}[{k!r}]", json_mode=json_mode)
+        elif infer(value, path) != node:
+            raise ValueError("scalar or array representation differs")
+    except (ValueError, TypeError) as exc:
+        raise StorageFormatError(f"{path}: invalid payload: {exc}") from exc
+
+
+def reconstruct(value: Any, hint: Any, path: str, *, hdf5: bool = False) -> Any:
+    """Apply compatible structural hints; never coerce or validate scalar values."""
+    seen_aliases = set()
+    while isinstance(hint, typing.TypeAliasType):
+        if id(hint) in seen_aliases:
+            return value
+        seen_aliases.add(id(hint))
+        hint = hint.__value__
+    origin, args = get_origin(hint), get_args(hint)
+    if origin is Annotated:
+        return reconstruct(value, args[0], path, hdf5=hdf5)
+    if origin in (typing.Union, types.UnionType):
+        rest = [a for a in args if a is not type(None)]
+        if len(args) == 2 and len(rest) == 1 and value is not None:
+            return reconstruct(value, rest[0], path, hdf5=hdf5)
+        return value
+    if origin in (list, tuple) or hint is list or hint is tuple:
+        if not isinstance(value, (list, tuple)):
+            return value
+        is_tuple = origin is tuple or hint is tuple
+        if (
+            is_tuple
+            and hint is not tuple
+            and not (len(args) == 2 and args[1] is Ellipsis)
+            and len(args) != len(value)
+        ):
+            return value
+        hints = (
+            [args[0]] * len(value)
+            if args and (not is_tuple or (len(args) == 2 and args[1] is Ellipsis))
+            else list(args)
+        )
+        result = [
+            reconstruct(
+                v, hints[i] if i < len(hints) else Any, f"{path}[{i}]", hdf5=hdf5
+            )
+            for i, v in enumerate(value)
+        ]
+        return (
+            tuple(result)
+            if (isinstance(value, tuple) if hdf5 else is_tuple)
+            else result
+        )
+    if origin is dict and isinstance(value, dict):
+        child = args[1] if len(args) == 2 else Any
+        return {
+            k: reconstruct(v, child, f"{path}[{k!r}]", hdf5=hdf5)
+            for k, v in value.items()
+        }
+    if (
+        isinstance(hint, type)
+        and dataclasses.is_dataclass(hint)
+        and isinstance(value, dict)
+    ):
+        fields = {f.name: f for f in dataclasses.fields(hint) if f.init}
+        if set(value) - set(fields) or any(
+            k not in value
+            and f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING
+            for k, f in fields.items()
+        ):
+            return value
+        try:
+            hints = typing.get_type_hints(hint, include_extras=True)
+        except Exception:
+            hints = getattr(hint, "__annotations__", {})
+        kwargs = {
+            k: reconstruct(v, hints.get(k, Any), f"{path}.{k}", hdf5=hdf5)
+            for k, v in value.items()
+        }
+        try:
+            return hint(**kwargs)
+        except Exception as exc:
+            raise ReconstructionError(
+                f"{path}: {qualified_name(hint)} constructor failed: {exc}"
+            ) from exc
+    return value
+
+
+def codec_identity(marker: Any) -> dict[str, str] | None:
+    if marker is None or getattr(marker, "serializer", None) is None:
+        return None
+    return {
+        "kind": type(marker).__name__,
+        "serializer": qualified_name(marker.serializer.func),
+        "deserializer": qualified_name(marker.validator.func),
+    }
+
+
+def run_codec(marker: Any, value: Any, path: str, *, decode: bool = False) -> Any:
+    from pydantic import TypeAdapter
+
+    from ._markers import Static
+
+    try:
+        if isinstance(marker, Static):
+            # Any deliberately disables ordinary annotation validation. Pydantic
+            # still supplies its supported serialization/validation info objects.
+            if decode:
+                return TypeAdapter(Annotated[Any, marker.validator]).validate_python(
+                    value
+                )
+            return TypeAdapter(Annotated[Any, marker.serializer]).dump_python(
+                value, mode="python", warnings="error"
+            )
+        return (marker.validator if decode else marker.serializer).func(value)
     except Exception as exc:
-        raise SpecError(f"{name}: cannot resolve field annotations: {exc}") from exc
-
-    fields: list[tuple[str, Node]] = []
-    for field in dataclasses.fields(cls):
-        where = f"{name}.{field.name}"
-        if not field.init:
-            raise SpecError(f"{where}: fields with init=False are not supported")
-        fields.append((field.name, _compile(hints[field.name], (*stack, cls), where)))
-    for key, hint in hints.items():
-        if isinstance(hint, dataclasses.InitVar):
-            raise SpecError(f"{name}.{key}: InitVar fields are not supported")
-    return DataclassNode(cls, tuple(fields))
+        operation = "deserializer" if decode else "serializer"
+        raise SerializerContractError(f"{path}: {operation} failed: {exc}") from exc
 
 
-def wrap_custom_data(annotation: Any, marker: Data) -> CustomData:
-    assert marker.serializer is not None and marker.validator is not None
-    return CustomData(annotation, marker.serializer, marker.validator)
+def validate_custom_data(value: Any, path: str, stack: tuple[int, ...] = ()) -> None:
+    from collections.abc import Mapping
+
+    if not isinstance(value, Mapping) or id(value) in stack:
+        raise SerializerContractError(
+            f"{path}: serializer must return an acyclic nested dict"
+        )
+    for k, v in value.items():
+        here = f"{path}[{k!r}]"
+        if not isinstance(k, str) or not k or "/" in k or k in (".", "..") or "\0" in k:
+            raise SerializerContractError(f"{here}: invalid key")
+        if isinstance(v, Mapping):
+            validate_custom_data(v, here, (*stack, id(value)))
+        elif type(v) not in (bool, int, float, str) and not isinstance(v, np.ndarray):
+            raise SerializerContractError(f"{here}: unsupported serializer value")
+        else:
+            try:
+                infer(v, here)
+            except ValueTypeError as exc:
+                raise SerializerContractError(str(exc)) from exc

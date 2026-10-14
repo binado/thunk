@@ -12,8 +12,8 @@ import thunk
 def test_roles_inferred() -> None:
     pfn = thunk.fn(spectra)
     spec = pfn._spec
-    assert [p.name for p in spec.data] == ["seeds", "population"]
-    assert [p.name for p in spec.static] == ["bins"]
+    assert [p.name for p in spec.data] == []
+    assert [p.name for p in spec.static] == []
     assert [p.name for p in spec.skip] == ["chunk_size"]
 
 
@@ -72,11 +72,10 @@ def test_var_args_rejected() -> None:
             thunk.fn(func)
 
 
-def test_unannotated_persisted_param_rejected_but_skip_is_free() -> None:
+def test_unannotated_parameters_and_unresolved_skip() -> None:
     def bad(x) -> None: ...  # noqa: ANN001
 
-    with pytest.raises(thunk.SpecError):
-        thunk.fn(bad)
+    assert thunk.fn(bad).flatten(1) == ({}, {"x": 1})
 
     class Opaque: ...
 
@@ -89,11 +88,10 @@ def test_unannotated_persisted_param_rejected_but_skip_is_free() -> None:
     thunk.fn(ok2)
 
 
-def test_unresolvable_persisted_annotation_rejected() -> None:
+def test_unresolvable_ordinary_annotation_accepted() -> None:
     def f(x: "Undefined") -> None: ...  # noqa: F821  # ty: ignore[unresolved-reference]
 
-    with pytest.raises(thunk.SpecError):
-        thunk.fn(f)
+    assert thunk.fn(f).flatten(1) == ({}, {"x": 1})
 
 
 def test_explicit_roles() -> None:
@@ -110,8 +108,8 @@ def test_explicit_roles() -> None:
 def test_static_with_arrays_rejected() -> None:
     def f(x: Annotated[np.ndarray, thunk.Static()]) -> None: ...
 
-    with pytest.raises(thunk.SpecError, match="Static"):
-        thunk.fn(f)
+    with pytest.raises(thunk.ValueTypeError, match="Static"):
+        thunk.fn(f).flatten(np.zeros(1))
 
 
 def test_two_roles_rejected() -> None:

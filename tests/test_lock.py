@@ -30,7 +30,7 @@ def test_roundtrip_and_output_agree(tmp_path: Path) -> None:
     with h5py.File(output) as h:
         doc = json.loads(lock.read_text())
         assert h.attrs["digest"] == doc["digest"] == output.stem
-        assert h.attrs["digest_version"] == 1
+        assert h.attrs["digest_version"] == 2
         assert h.attrs["inputs_digest"] == doc["inputs"]["digest"]
         assert h.attrs["opts_digest"] == doc["opts"]["digest"]
     p.save(tmp_path / "i.h5", tmp_path / "o.json", **inputs, **opts)
@@ -63,8 +63,7 @@ def test_path_is_pure_and_excludes_function_return_skip(
         a.output_path(inputs, opts, base_dir=tmp_path / "missing")
         == tmp_path / "missing" / key
     )
-    with pytest.raises(thunk.ValueTypeError):
-        a.output_path(inputs, {**opts, "seed": 1.0})
+    assert a.output_path(inputs, {**opts, "seed": 1.0}) != key
     with pytest.raises(TypeError):
         a.output_path({}, opts)
 
@@ -100,7 +99,7 @@ def test_empty_groups_and_schema_identity(tmp_path: Path) -> None:
     lock = p.save_locked(tmp_path / "i.h5", tmp_path / "o.json")
     assert p.load_lock(lock) == ({}, {})
     assert p.output_path({}, {}).stem == json.loads(lock.read_text())["digest"]
-    assert thunk.fn(a).output_path({}, {"n": 1}) != thunk.fn(b).output_path(
+    assert thunk.fn(a).output_path({}, {"n": 1}) == thunk.fn(b).output_path(
         {}, {"n": 1}
     )
 
@@ -159,11 +158,11 @@ def test_tampering(tmp_path: Path, target: str) -> None:
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("version", 2),
+        ("version", 1),
         ("version", True),
         ("version", 1.0),
         ("digest_version", "1"),
-        ("digest_version", 2),
+        ("digest_version", 1),
         ("digest", "A" * 64),
         ("digest", "a" * 63),
         ("unknown", 1),
@@ -202,8 +201,7 @@ def test_schema_and_hdf_fingerprints(tmp_path: Path) -> None:
         x: np.ndarray, seed: int | None = 42, *, lockfile: str = "yes"
     ) -> None: ...
 
-    with pytest.raises(thunk.SchemaMismatchError):
-        thunk.fn(changed).load_lock(lock)
+    assert thunk.fn(changed).load_lock(lock)[1]["seed"] == 42
     with h5py.File(tmp_path / "i.h5", "r+") as h:
         h.attrs["fingerprints"] = json.dumps({"x": "0" * 64})
     with pytest.raises(thunk.SchemaMismatchError):
@@ -316,7 +314,7 @@ def test_locked_options_require_exact_names(tmp_path: Path, change: str) -> None
     else:
         del doc["seed"]
     o.write_text(json.dumps(doc))
-    with pytest.raises(thunk.SchemaMismatchError):
+    with pytest.raises(thunk.StorageFormatError):
         p.load_lock(lock)
 
 
@@ -349,7 +347,7 @@ def test_lossy_mesh_validator_cannot_hide_tampering(tmp_path: Path) -> None:
         Mesh(np.zeros((3, 2)), "tri"),
     )
     with h5py.File(tmp_path / "i.h5", "r+") as h:
-        h["inputs/m/meta/n"].attrs["value"] = "999"
+        h["inputs/m/kmeta/kn"].attrs["value"] = "999"
     with pytest.raises(thunk.DigestMismatchError):
         p.load_lock(lock)
 
@@ -378,7 +376,7 @@ def test_data_verified_before_user_code(tmp_path: Path) -> None:
     assert calls == ["decode"]
     calls.clear()
     with h5py.File(tmp_path / "i.h5", "r+") as h:
-        h["inputs/x/value"].attrs["value"] = "999"
+        h["inputs/x/kvalue"].attrs["value"] = "999"
     with pytest.raises(thunk.DigestMismatchError):
         p.load_lock(lock)
     assert calls == []
@@ -406,7 +404,7 @@ def test_dataclass_constructed_only_after_verification(tmp_path: Path) -> None:
     assert calls == ["construct"]
     calls.clear()
     with h5py.File(tmp_path / "i.h5", "r+") as h:
-        h["inputs/x/0/value"].attrs["value"] = "999"
+        h["inputs/x/0/kvalue"].attrs["value"] = "999"
     with pytest.raises(thunk.DigestMismatchError):
         p.load_lock(lock)
     assert calls == []

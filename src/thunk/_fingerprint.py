@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import struct
 from collections.abc import Mapping
 from typing import Any
@@ -9,23 +10,7 @@ from typing import Any
 import numpy as np
 
 from . import _jax
-from ._signature import Param
-from ._spec import (
-    Array,
-    CustomData,
-    CustomStatic,
-    DataclassNode,
-    DictNode,
-    FixedTupleNode,
-    JaxArray,
-    ListNode,
-    LiteralNode,
-    Node,
-    NoneNode,
-    OptionalNode,
-    Scalar,
-    VarTupleNode,
-)
+from ._spec import Node
 
 
 def canonical_json(obj: Any) -> str:
@@ -40,15 +25,6 @@ def fingerprint(name: str, role: str, node: Node) -> str:
     return _sha256(
         canonical_json({"name": name, "role": role, "spec": node.describe()})
     )
-
-
-def param_fingerprint(param: Param) -> str:
-    assert param.node is not None
-    return fingerprint(param.name, param.role, param.node)
-
-
-def output_fingerprint(node: Node) -> str:
-    return fingerprint("output", "output", node)
 
 
 class _Hasher:
@@ -70,7 +46,9 @@ class _Hasher:
             case int():
                 self.blob(b"i", str(value).encode())
             case float():
-                self.blob(b"f", struct.pack(">d", value))
+                self.blob(
+                    b"f", struct.pack(">d", math.nan if math.isnan(value) else value)
+                )
             case str():
                 self.blob(b"s", value.encode())
             case None:
@@ -97,69 +75,32 @@ class _Hasher:
         else:
             self.scalar(value)
 
-    def feed(self, node: Node, value: Any, *, serialized: bool = False) -> None:
-        match node:
-            case Scalar() | LiteralNode():
-                self.scalar(value)
-            case NoneNode():
-                self.tag(b"N")
-            case Array():
-                self.array(value)
-            case JaxArray():
-                data, implementation = _jax.to_host(value, "content digest")
-                if implementation is None:
-                    self.tag(b"J")
-                else:
-                    self.blob(b"K", implementation.encode())
-                self.array(data)
-            case OptionalNode(inner=inner):
-                if value is None:
-                    self.tag(b"N")
-                else:
-                    self.tag(b"S")
-                    self.feed(inner, value, serialized=serialized)
-            case ListNode(inner=inner) | VarTupleNode(inner=inner):
-                self.blob(b"[", struct.pack(">Q", len(value)))
-                for item in value:
-                    self.feed(inner, item, serialized=serialized)
-            case FixedTupleNode(items=items):
-                self.tag(b"(")
-                for sub, item in zip(items, value, strict=True):
-                    self.feed(sub, item, serialized=serialized)
-            case DictNode(value=inner):
-                self.blob(b"{", struct.pack(">Q", len(value)))
-                for key, item in value.items():
-                    self.scalar(key)
-                    self.feed(inner, item, serialized=serialized)
-            case DataclassNode(fields=fields):
-                self.tag(b"D")
-                for name, sub in fields:
-                    self.feed(
-                        sub,
-                        value[name] if serialized else getattr(value, name),
-                        serialized=serialized,
-                    )
-            case CustomData(serializer=serializer):
-                self.tag(b"C")
-                self.nested(value if serialized else serializer.func(value))
-            case CustomStatic():
-                raise TypeError("custom static values are digested through JSON")
-            case _:
-                raise TypeError(f"cannot digest node {node!r}")
+    def feed(self, node: Node, value: Any) -> None:
+        self.blob(b"t", node.kind.encode())
+        if node.kind == "array":
+            self.array(value)
+        elif node.kind == "jax_array":
+            data, implementation = _jax.to_host(value, "content digest")
+            self.scalar(implementation)
+            self.array(data)
+        elif node.kind in ("dict", "dataclass", "list", "tuple"):
+            for i, (key, sub) in enumerate(node.children):
+                self.scalar(key)
+                self.feed(
+                    sub, value[i] if node.kind in ("list", "tuple") else value[key]
+                )
+        else:
+            self.scalar(value)
 
     def hexdigest(self) -> str:
         return self.h.hexdigest()
 
 
-def group_digest(
-    params: tuple[Param, ...], values: Mapping[str, Any], *, serialized: bool = False
-) -> str:
-    """Content digest of a group of ``Data`` parameter values."""
+def group_digest(nodes: Mapping[str, Node], values: Mapping[str, Any]) -> str:
     hasher = _Hasher()
-    for p in params:
-        assert p.node is not None
-        hasher.blob(b"p", p.name.encode())
-        hasher.feed(p.node, values[p.name], serialized=serialized)
+    for name, node in nodes.items():
+        hasher.blob(b"p", name.encode())
+        hasher.feed(node, values[name])
     return hasher.hexdigest()
 
 
@@ -168,7 +109,7 @@ def json_digest(encoded: Mapping[str, Any]) -> str:
     return _sha256(json.dumps(encoded, separators=(",", ":"), allow_nan=False))
 
 
-DIGEST_VERSION = 1
+DIGEST_VERSION = 2
 
 
 def combined_digest(

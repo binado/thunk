@@ -4,6 +4,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
+from numbers import Integral
 from pathlib import Path
 from typing import Any
 
@@ -11,26 +12,10 @@ import h5py
 import numpy as np
 
 from . import _jax
-from ._errors import SerializerContractError, StorageFormatError, ValueTypeError
-from ._spec import (
-    Array,
-    CustomData,
-    CustomStatic,
-    DataclassNode,
-    DictNode,
-    FixedTupleNode,
-    JaxArray,
-    ListNode,
-    LiteralNode,
-    Node,
-    NoneNode,
-    OptionalNode,
-    Scalar,
-    VarTupleNode,
-    qualified_name,
-)
+from ._errors import StorageFormatError
+from ._spec import Node
 
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 _NONFINITE = {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf}
 
 # -- file envelope -------------------------------------------------------
@@ -56,19 +41,23 @@ def open_checked(path: Path, kind: str) -> tuple[h5py.File, dict[str, str]]:
         raise StorageFormatError(f"{path}: not a readable HDF5 file: {exc}") from exc
     try:
         found = _attr(f, "thunk_format", path)
-        if found != kind:
+        if not isinstance(found, str) or found != kind:
             raise StorageFormatError(
                 f"{path}: expected a thunk {kind!r} file, found {found!r}"
             )
         version = _attr(f, "storage_version", path)
-        if version != STORAGE_VERSION:
+        if (
+            not isinstance(version, Integral)
+            or isinstance(version, bool)
+            or version != STORAGE_VERSION
+        ):
             raise StorageFormatError(
                 f"{path}: unsupported storage_version {version!r} "
                 f"(this thunk reads {STORAGE_VERSION})"
             )
         try:
             fps = json.loads(_attr(f, "fingerprints", path))
-        except json.JSONDecodeError as exc:
+        except (ValueError, TypeError) as exc:
             raise StorageFormatError(f"{path}: malformed fingerprints") from exc
         if not isinstance(fps, dict):
             raise StorageFormatError(f"{path}: malformed fingerprints")
@@ -172,11 +161,15 @@ def _read_array(ds: h5py.Dataset, where: str) -> np.ndarray:
         raise StorageFormatError(
             f"{where}: object/variable-length datasets are unsupported"
         )
+    if ds.shape is None:
+        raise StorageFormatError(f"{where}: null array dataset")
     data = np.asarray(ds[()])
     if "numpy_dtype" in ds.attrs:
         dtype = np.dtype(_attr(ds, "numpy_dtype", where))
         if dtype.kind != "U" or data.dtype != np.dtype("<u4") or data.ndim < 1:
             raise StorageFormatError(f"{where}: malformed unicode array")
+        if data.shape[-1] < 1 or data.shape[-1] != max(dtype.itemsize // 4, 1):
+            raise StorageFormatError(f"{where}: malformed unicode width")
         shape = data.shape[:-1]
         nchar = data.shape[-1]
         native = np.asarray(data, order="C").reshape(-1).view(f"<U{nchar}")
@@ -184,57 +177,6 @@ def _read_array(ds: h5py.Dataset, where: str) -> np.ndarray:
     if data.dtype.kind not in "biufcS":
         raise StorageFormatError(f"{where}: unsupported dtype {data.dtype}")
     return data
-
-
-# -- writer --------------------------------------------------------------
-
-
-def write_node(parent: h5py.Group, name: str, node: Node, value: Any) -> None:
-    """Write an already-validated ``value`` at ``parent[name]``."""
-    match node:
-        case Scalar() | LiteralNode():
-            _write_scalar(parent, name, value)
-        case NoneNode():
-            _write_none(parent, name)
-        case Array():
-            _write_array(parent, name, value)
-        case JaxArray():
-            data, implementation = _jax.to_host(value, f"{parent.name}/{name}")
-            ds = parent.create_dataset(name, data=data)
-            ds.attrs["jax_kind"] = "prng_key" if implementation else "array"
-            if implementation is not None:
-                ds.attrs["jax_impl"] = implementation
-        case OptionalNode(inner=inner):
-            if value is None:
-                _write_none(parent, name)
-            else:
-                write_node(parent, name, inner, value)
-        case ListNode(inner=inner) | VarTupleNode(inner=inner):
-            kind = "list" if isinstance(node, ListNode) else "tuple"
-            g = _group(parent, name, kind)
-            for i, item in enumerate(value):
-                write_node(g, str(i), inner, item)
-        case FixedTupleNode(items=items):
-            g = _group(parent, name, "tuple")
-            for i, (sub, item) in enumerate(zip(items, value, strict=True)):
-                write_node(g, str(i), sub, item)
-        case DictNode(value=inner):
-            g = _group(parent, name, "dict", track_order=True)
-            for key, item in value.items():
-                write_node(g, escape_key(key), inner, item)
-        case DataclassNode(cls=cls, fields=fields):
-            g = _group(parent, name, "dataclass")
-            g.attrs["type"] = qualified_name(cls)
-            for fname, sub in fields:
-                write_node(g, fname, sub, getattr(value, fname))
-        case CustomData(serializer=serializer):
-            produced = serializer.func(value)
-            g = _group(parent, name, "custom", track_order=True)
-            _write_nested(g, produced, qualified_name(serializer.func))
-        case CustomStatic():
-            raise TypeError("custom static parameters are stored in the opts file")
-        case _:
-            raise TypeError(f"cannot write node {node!r}")
 
 
 def _group(
@@ -247,41 +189,6 @@ def _group(
 
 def _write_none(parent: h5py.Group, name: str) -> None:
     _group(parent, name, "none")
-
-
-def _write_nested(group: h5py.Group, produced: Any, who: str) -> None:
-    """Write a custom serializer's nested dict, enforcing its contract."""
-    if not isinstance(produced, Mapping):
-        raise SerializerContractError(
-            f"{who}: serializer must return a dict, got {type(produced).__name__}"
-        )
-    for key, item in produced.items():
-        if (
-            not isinstance(key, str)
-            or not key
-            or "/" in key
-            or key in (".", "..")
-            or "\0" in key
-        ):
-            raise SerializerContractError(f"{who}: invalid key {key!r}")
-        if isinstance(item, Mapping):
-            sub = _group(group, key, "dict", track_order=True)
-            _write_nested(sub, item, who)
-        elif isinstance(item, np.ndarray):
-            if item.dtype.kind not in "biufcUS":
-                raise SerializerContractError(
-                    f"{who}: key {key!r} has unsupported array dtype {item.dtype}"
-                )
-            _write_array(group, key, item)
-        elif type(item) in (bool, int, float, str):
-            _write_scalar(group, key, item)
-        else:
-            raise SerializerContractError(
-                f"{who}: key {key!r} has unsupported value type {type(item).__name__}"
-            )
-
-
-# -- reader --------------------------------------------------------------
 
 
 def _expect_group(obj: Any, kind: str, where: str) -> h5py.Group:
@@ -304,135 +211,86 @@ def _indexed(g: h5py.Group, where: str) -> list[Any]:
     return [g[n] for n in order]
 
 
-def read_node(obj: Any, node: Node, where: str, *, serialized: bool = False) -> Any:
-    """Read values, retaining custom trees and field mappings in serialized mode.
+def write_node(parent: h5py.Group, name: str, node: Node, value: Any) -> None:
+    kind = node.kind
+    if kind in ("scalar", "nonfinite"):
+        _write_scalar(parent, name, value)
+    elif kind == "none":
+        _write_none(parent, name)
+    elif kind == "array":
+        _write_array(parent, name, value)
+    elif kind == "jax_array":
+        data, implementation = _jax.to_host(value, name)
+        ds = parent.create_dataset(name, data=data)
+        ds.attrs["jax_kind"] = "prng_key" if implementation else "array"
+        if implementation is not None:
+            ds.attrs["jax_impl"] = implementation
+    else:
+        g = _group(parent, name, kind, track_order=True)
+        if node.type is not None:
+            g.attrs["type"] = node.type
+        for i, (key, sub) in enumerate(node.children):
+            sequence = kind in ("list", "tuple")
+            write_node(
+                g,
+                key if sequence else escape_key(key),
+                sub,
+                value[i] if sequence else value[key],
+            )
 
-    Serialized mode avoids user validators and constructors for lock verification.
-    """
-    match node:
-        case Scalar(type=tp):
-            return _read_scalar(_expect_group(obj, "scalar", where), tp, where)
-        case LiteralNode():
-            value = _read_scalar(_expect_group(obj, "scalar", where), None, where)
-            try:
-                node.validate(value, where)
-            except TypeError as exc:
-                raise StorageFormatError(str(exc)) from exc
-            return value
-        case NoneNode():
-            _expect_group(obj, "none", where)
-            return None
-        case Array():
-            if not isinstance(obj, h5py.Dataset):
-                raise StorageFormatError(f"{where}: expected an array dataset")
-            return _read_array(obj, where)
-        case JaxArray():
-            if not isinstance(obj, h5py.Dataset):
-                raise StorageFormatError(f"{where}: expected a JAX array dataset")
+
+def read_node(obj: Any, where: str) -> tuple[Node, Any]:
+    """Decode stored tags only. Never import stored dataclass names."""
+    if isinstance(obj, h5py.Dataset):
+        if "jax_kind" in obj.attrs:
             kind = _attr(obj, "jax_kind", where)
             if not isinstance(kind, str) or kind not in ("array", "prng_key"):
-                raise StorageFormatError(f"{where}: unsupported jax_kind {kind!r}")
-            implementation = (
-                _attr(obj, "jax_impl", where) if kind == "prng_key" else None
-            )
-            if implementation is not None and not isinstance(implementation, str):
+                raise StorageFormatError(f"{where}: unsupported jax_kind")
+            impl = _attr(obj, "jax_impl", where) if kind == "prng_key" else None
+            if impl is not None and not isinstance(impl, str):
                 raise StorageFormatError(f"{where}: malformed PRNG implementation")
-            if obj.shape is None or obj.dtype not in _jax.NUMERIC_DTYPES:
-                raise StorageFormatError(
-                    f"{where}: unsupported JAX dataset shape or dtype"
-                )
-            return _jax.from_host(np.asarray(obj[()]), kind, implementation, where)
-        case OptionalNode(inner=inner):
-            if isinstance(obj, h5py.Group) and _attr(obj, "kind", where) == "none":
-                return None
-            return read_node(obj, inner, where, serialized=serialized)
-        case ListNode(inner=inner):
-            g = _expect_group(obj, "list", where)
-            return [
-                read_node(c, inner, f"{where}[{i}]", serialized=serialized)
-                for i, c in enumerate(_indexed(g, where))
-            ]
-        case VarTupleNode(inner=inner):
-            g = _expect_group(obj, "tuple", where)
-            return tuple(
-                read_node(c, inner, f"{where}[{i}]", serialized=serialized)
-                for i, c in enumerate(_indexed(g, where))
+            if obj.shape is None:
+                raise StorageFormatError(f"{where}: invalid JAX shape")
+            return Node("jax_array"), _jax.from_host(
+                np.asarray(obj[()]), kind, impl, where
             )
-        case FixedTupleNode(items=items):
-            g = _expect_group(obj, "tuple", where)
-            children = _indexed(g, where)
-            if len(children) != len(items):
-                raise StorageFormatError(
-                    f"{where}: expected {len(items)} tuple items, found {len(children)}"
-                )
-            return tuple(
-                read_node(c, sub, f"{where}[{i}]", serialized=serialized)
-                for i, (c, sub) in enumerate(zip(children, items, strict=True))
-            )
-        case DictNode(value=inner):
-            g = _expect_group(obj, "dict", where)
-            _require_ordered(g, where)
-            result: dict[str, Any] = {}
-            for name in g:
-                key = unescape_key(name, where)
-                result[key] = read_node(
-                    g[name], inner, f"{where}[{key!r}]", serialized=serialized
-                )
-            return result
-        case DataclassNode(cls=cls, fields=fields):
-            g = _expect_group(obj, "dataclass", where)
-            expected = {fname for fname, _ in fields}
-            if set(g.keys()) != expected:
-                raise StorageFormatError(
-                    f"{where}: dataclass fields {sorted(g.keys())} do not match "
-                    f"{sorted(expected)}"
-                )
-            kwargs = {
-                fname: read_node(
-                    g[fname], sub, f"{where}.{fname}", serialized=serialized
-                )
-                for fname, sub in fields
-            }
-            return kwargs if serialized else cls(**kwargs)
-        case CustomData(validator=validator):
-            g = _expect_group(obj, "custom", where)
-            nested = _read_nested(g, where)
-            if serialized:
-                return nested
-            result = validator.func(nested)
-            try:
-                node.validate(result, where)
-            except ValueTypeError as exc:
-                raise SerializerContractError(
-                    f"{where}: validator returned a wrong type: {exc}"
-                ) from exc
-            return result
-        case CustomStatic():
-            raise TypeError("custom static parameters are stored in the opts file")
-        case _:
-            raise TypeError(f"cannot read node {node!r}")
+        return Node("array"), _read_array(obj, where)
+    kind = _attr(obj, "kind", where)
+    if kind == "scalar":
+        if len(obj):
+            raise StorageFormatError(f"{where}: scalar has children")
+        value = _read_scalar(obj, None, where)
+        from ._spec import infer
+
+        return infer(value, where), value
+    if kind == "none":
+        if len(obj):
+            raise StorageFormatError(f"{where}: none has children")
+        return Node("none"), None
+    if kind in ("list", "tuple"):
+        children = [
+            read_node(c, f"{where}[{i}]") for i, c in enumerate(_indexed(obj, where))
+        ]
+        values = [v for _, v in children]
+        return Node(
+            kind, tuple((str(i), n) for i, (n, _) in enumerate(children))
+        ), tuple(values) if kind == "tuple" else values
+    if kind in ("dict", "dataclass"):
+        _require_ordered(obj, where)
+        children, values = [], {}
+        for name in obj:
+            key = unescape_key(name, where)
+            if escape_key(key) != name or key in values:
+                raise StorageFormatError(f"{where}: invalid key {name!r}")
+            n, v = read_node(obj[name], f"{where}[{key!r}]")
+            children.append((key, n))
+            values[key] = v
+        tp = _attr(obj, "type", where) if kind == "dataclass" else None
+        return Node(kind, tuple(children), tp), values
+    raise StorageFormatError(f"{where}: unknown node kind {kind!r}")
 
 
 def _require_ordered(g: h5py.Group, where: str) -> None:
     flags = g.id.get_create_plist().get_link_creation_order()
     if not flags & h5py.h5p.CRT_ORDER_TRACKED:
         raise StorageFormatError(f"{where}: dict group does not track creation order")
-
-
-def _read_nested(g: h5py.Group, where: str) -> dict[str, Any]:
-    _require_ordered(g, where)
-    out: dict[str, Any] = {}
-    for name in g:
-        child = g[name]
-        here = f"{where}/{name}"
-        if isinstance(child, h5py.Dataset):
-            out[name] = _read_array(child, here)
-        else:
-            kind = _attr(child, "kind", here)
-            if kind == "dict":
-                out[name] = _read_nested(child, here)
-            elif kind == "scalar":
-                out[name] = _read_scalar(child, None, here)
-            else:
-                raise StorageFormatError(f"{here}: unexpected kind {kind!r}")
-    return out

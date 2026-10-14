@@ -185,7 +185,7 @@ def _tamper(path: Path, fn: Any) -> None:
         (tuple[int, int], (1, 2), lambda f: f["inputs/x"].__delitem__("1")),
         (dict[str, int], {"a": 1}, lambda f: f["inputs/x"].move("ka", "a")),
         (dict[str, int], {"a": 1}, lambda f: f["inputs/x"].move("ka", "k%ZZ")),
-        (Pt, Pt(np.zeros(1), "a"), lambda f: f["inputs/x"].__delitem__("label")),
+        (Pt, Pt(np.zeros(1), "a"), lambda f: f["inputs/x"].__delitem__("klabel")),
         (int, 3, lambda f: f["inputs/x"].attrs.__setitem__("value", "3.0")),
         (int, 3, lambda f: f["inputs/x"].attrs.__setitem__("value", "oops")),
         (

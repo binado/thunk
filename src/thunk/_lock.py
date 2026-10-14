@@ -1,7 +1,7 @@
 """Strict metadata for a saved inputs/options pair."""
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -18,6 +18,7 @@ class LockedGroup(_Model):
     path: str
     digest: Digest
     fingerprints: dict[str, Digest]
+    representations: dict[str, Any]
 
     @field_validator("path")
     @classmethod
@@ -28,8 +29,8 @@ class LockedGroup(_Model):
 
 
 class Lock(_Model):
-    version: Literal[1]
-    digest_version: Literal[1]
+    version: Literal[2]
+    digest_version: Literal[2]
     digest: Digest
     inputs: LockedGroup
     opts: LockedGroup

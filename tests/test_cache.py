@@ -105,17 +105,15 @@ def test_validation_on_hit_and_miss(tmp_path: Path) -> None:
         for skipped in (None, {"wrong": 2}):
             with pytest.raises(TypeError):
                 p.cached({}, {"x": 1}, outdir=tmp_path / "f", skipped=skipped)
-        with pytest.raises(thunk.ValueTypeError):
-            p.cached({}, {"x": 1.0}, outdir=tmp_path / "f", skipped={"skip": 2})
-    assert calls == [1]
+        assert (
+            p.cached({}, {"x": 1.0}, outdir=tmp_path / "f", skipped={"skip": 2}) == 1.0
+        )
+    assert calls == [1, 1]
 
     def bad(x: int) -> object:
         raise AssertionError("executed")
 
-    with pytest.raises(thunk.OutputCodecError):
-        thunk.cache(bad, outdir=tmp_path / "f")
-    with pytest.raises(thunk.OutputCodecError):
-        thunk.fn(bad).cached({}, {"x": 1}, outdir=tmp_path / "f")
+    assert thunk.cache(bad, outdir=tmp_path / "f")(1) == 1
 
 
 def test_cache_metadata_and_schema(tmp_path: Path) -> None:
@@ -135,7 +133,7 @@ def test_cache_metadata_and_schema(tmp_path: Path) -> None:
             (None, thunk.StorageFormatError),
             ("bad", thunk.StorageFormatError),
             (
-                2 if attr == "digest_version" else "0" * 64,
+                1 if attr == "digest_version" else "0" * 64,
                 thunk.StorageFormatError
                 if attr == "digest_version"
                 else thunk.DigestMismatchError,
@@ -153,8 +151,7 @@ def test_cache_metadata_and_schema(tmp_path: Path) -> None:
     def other(x: int) -> str:
         raise AssertionError("executed")
 
-    with pytest.raises(thunk.SchemaMismatchError):
-        thunk.cache(other, outdir=tmp_path / "f")(1)
+    assert thunk.cache(other, outdir=tmp_path / "f")(1) == 1
     path.write_text("not HDF5")
     with pytest.raises(thunk.StorageFormatError):
         wrapped(1)
@@ -174,7 +171,7 @@ def test_failures_preserve_entries(
         if state == "raise":
             raise RuntimeError("failed")
         if state == "invalid":
-            return "bad"  # ty: ignore[invalid-return-type]
+            return object()  # ty: ignore[invalid-return-type]
         return 1
 
     p = thunk.fn(f)
@@ -192,7 +189,9 @@ def test_failures_preserve_entries(
         assert path.read_bytes() == original
         with pytest.raises(error):
             thunk.cache(f, outdir=tmp_path / "missing")()
-        assert not list((tmp_path / "missing").iterdir())
+        assert not (tmp_path / "missing").exists() or not list(
+            (tmp_path / "missing").iterdir()
+        )
     state = "ok"
 
     def fail_publish(temp: Path, dest: Path) -> None:
@@ -232,14 +231,14 @@ def test_digest_computed_once_before_execution(
     x = np.array([1])
     inputs, opts = p.flatten(x)
     path = p.output_path(inputs, opts, base_dir=tmp_path / "f")
-    original = p._digests
+    original = _persistence._digests
     calls = []
 
     def counted(inputs, opts):
         calls.append(1)
         return original(inputs, opts)
 
-    monkeypatch.setattr(p, "_digests", counted)
+    monkeypatch.setattr(_persistence, "_digests", counted)
     p.cached(inputs, opts, outdir=tmp_path / "f")
     assert calls == [1]
     with h5py.File(path) as h:
@@ -304,4 +303,6 @@ def test_serialization_failure_is_atomic(
             thunk.cache(f, outdir=tmp_path / name, refresh=True)()
     assert path.read_bytes() == original
     assert list(path.parent.iterdir()) == [path]
-    assert not list((tmp_path / "missing").iterdir())
+    assert not (tmp_path / "missing").exists() or not list(
+        (tmp_path / "missing").iterdir()
+    )
